@@ -2,6 +2,7 @@
 import re
 from text import cleaners
 from text.symbols import symbols
+from textgrid import TextGrid
 
 
 # Mappings from symbol to numeric ID and vice versa:
@@ -12,11 +13,10 @@ _id_to_symbol = {i: s for i, s in enumerate(symbols)}
 _curly_re = re.compile(r'(.*?)\{(.+?)\}(.*)')
 
 
-def text_to_sequence(text, cleaner_names):
+def text_to_sequence(text, g2p, use_textgrid=False):
   '''Converts a string of text to a sequence of IDs corresponding to the symbols in the text.
 
-    The text can optionally have ARPAbet sequences enclosed in curly braces embedded
-    in it. For example, "Turn left on {HH AW1 S S T AH0 N} Street."
+    The text is converted to an ARPAbet sequence. For example, "HH AW1 S S T AH0 N."
 
     Args:
       text: string to convert to a sequence
@@ -25,19 +25,12 @@ def text_to_sequence(text, cleaner_names):
     Returns:
       List of integers corresponding to the symbols in the text
   '''
-  sequence = []
 
-  # Check for curly braces and treat their contents as ARPAbet:
-  while len(text):
-    m = _curly_re.match(text)
-    if not m:
-      sequence += _symbols_to_sequence(_clean_text(text, cleaner_names))
-      break
-    sequence += _symbols_to_sequence(_clean_text(m.group(1), cleaner_names))
-    sequence += _arpabet_to_sequence(m.group(2))
-    text = m.group(3)
+  if not use_textgrid:
+    text = re.sub(re.compile(r'\s+'), ' ', text)
+    text = g2p(text)
 
-  return sequence
+  return  _arpabet_to_sequence(text)
 
 
 def sequence_to_text(sequence):
@@ -67,7 +60,7 @@ def _symbols_to_sequence(symbols):
 
 
 def _arpabet_to_sequence(text):
-  return _symbols_to_sequence(['@' + s for s in text.split()])
+  return _symbols_to_sequence([s for s in text])
 
 
 def _should_keep_symbol(s):

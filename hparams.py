@@ -52,6 +52,13 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
 
+        # Duration parameters
+        duration_rnn_dim=512,
+        range_rnn_dim=512,
+        duration_lambda=2.0,
+        positional_embedding_dim=32,
+        timestep_denominator=10000,
+
         # Decoder parameters
         n_frames_per_step=1,  # currently only 1 is supported
         decoder_rnn_dim=1024,

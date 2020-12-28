@@ -7,6 +7,11 @@ from layers import ConvNorm, LinearNorm
 from utils import to_gpu, get_mask_from_lengths
 
 
+def zoneout(prev, current, p=0.1):
+    mask = torch.empty_like(prev).bernoulli_(p)
+    return mask * prev + (1 - mask) * current
+
+
 class LocationLayer(nn.Module):
     def __init__(self, attention_n_filters, attention_kernel_size,
                  attention_dim):
@@ -84,6 +89,60 @@ class Attention(nn.Module):
         attention_context = attention_context.squeeze(1)
 
         return attention_context, attention_weights
+
+class Duration(nn.Module):
+    def __init__(self):
+        super(Duration, self).__init__()
+        
+        # Duration predictor
+        self.duration_lstm = nn.LSTM(hparams.encoder_embedding_dim,
+                            hparams.duration_rnn_dim, 2,
+                            batch_first=True, bidirectional=True)
+
+        # Range parameter predictor
+        self.range_lstm = nn.LSTM(hparams.encoder_embedding_dim,
+                            hparams.range_rnn_dim, 2,
+                            batch_first=True, bidirectional=True)
+
+    def positional_embedding(self, size):
+        batch_size, seq_len, upsampled_emb_dim = size
+        assert upsampled_emb_dim % 2 == 0, "Must use even embedding dimension"
+
+        positional_embedding = torch.zeros(batch_size, seq_len, upsampled_emb_dim)
+        pos = torch.arange(0, seq_len).unsqueeze(1)
+
+        # torch.exp format is y = e^(x_i)
+        divisor = torch.exp((torch.arange(0, upsampled_emb_dim, 2, dtype=torch.float) *
+                             -(math.log(10000.0) / upsampled_emb_dim)))
+
+        positional_embedding[:, :, 0::2] = torch.sin(pos.float() * divisor)
+        positional_embedding[:, :, 1::2] = torch.cos(pos.float() * divisor)
+
+        return positional_embedding
+
+    def gaussian_upsampling(self, H, d, std_dev, frames_size):
+        # frames_size = (n_frames, n_mels)
+        # All inputs use format (seq_len, size)
+        # std_dev = sigma
+        c = torch.zeros_like(d)
+        norm = torch.zeros_like(c)
+        norm_sum = torch.zeros_like(c)
+
+        c = torch.cumsum(d, 2) - (d / 2)
+
+        norm = torch.normal(c, std_dev, size=frames_size)
+        norm_sum = torch.sum(torch.normal(c, std_dev, size=frames_size), 2)
+
+       
+        upsampled_seq = torch.sum(w*H)
+
+    def forward(self, x):
+        self.duration_lstm.flatten_parameters()
+        duration_h, duration_c = self.duration_lstm(x)
+
+        self.range_lstm.flatten_parameters()
+        range_h, range_c = self.range_lstm(x)
+
 
 
 class Prenet(nn.Module):
@@ -186,6 +245,8 @@ class Encoder(nn.Module):
 
         outputs, _ = nn.utils.rnn.pad_packed_sequence(
             outputs, batch_first=True)
+        if self.training:
+            outputs = zoneout(outputs[0], outputs, p=0.1)
 
         return outputs
 
@@ -228,8 +289,11 @@ class Decoder(nn.Module):
             hparams.attention_dim, hparams.attention_location_n_filters,
             hparams.attention_location_kernel_size)
 
-        self.decoder_rnn = nn.LSTMCell(
+        self.decoder_rnn1 = nn.LSTMCell(
             hparams.attention_rnn_dim + hparams.encoder_embedding_dim,
+            hparams.decoder_rnn_dim, 1)
+        self.decoder_rnn2 = nn.LSTMCell(
+            hparams.decoder_rnn_dim,
             hparams.decoder_rnn_dim, 1)
 
         self.linear_projection = LinearNorm(
@@ -272,9 +336,13 @@ class Decoder(nn.Module):
         self.attention_cell = Variable(memory.data.new(
             B, self.attention_rnn_dim).zero_())
 
-        self.decoder_hidden = Variable(memory.data.new(
+        self.decoder_hidden1 = Variable(memory.data.new(
             B, self.decoder_rnn_dim).zero_())
-        self.decoder_cell = Variable(memory.data.new(
+        self.decoder_cell1 = Variable(memory.data.new(
+            B, self.decoder_rnn_dim).zero_())
+        self.decoder_hidden2 = Variable(memory.data.new(
+            B, self.decoder_rnn_dim).zero_())
+        self.decoder_cell2 = Variable(memory.data.new(
             B, self.decoder_rnn_dim).zero_())
 
         self.attention_weights = Variable(memory.data.new(
@@ -365,10 +433,16 @@ class Decoder(nn.Module):
         self.attention_weights_cum += self.attention_weights
         decoder_input = torch.cat(
             (self.attention_hidden, self.attention_context), -1)
-        self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
-            decoder_input, (self.decoder_hidden, self.decoder_cell))
-        self.decoder_hidden = F.dropout(
-            self.decoder_hidden, self.p_decoder_dropout, self.training)
+        self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
+            decoder_input, (self.decoder_hidden1, self.decoder_cell1))
+        if self.training:
+            self.decoder_hidden1 = zoneout(
+                self.decoder_hidden1[0], self.decoder_hidden1, p=0.1)
+        self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn2(
+            decoder_hidden1, (self.decoder_hidden2, self.decoder_cell2))
+        if self.training:
+            self.decoder_hidden2 = zoneout(
+                self.decoder_hidden2[0], self.decoder_hidden2, p=0.1)
 
         decoder_hidden_attention_context = torch.cat(
             (self.decoder_hidden, self.attention_context), dim=1)

@@ -1,12 +1,59 @@
 import random
+import string
+import glob
 import numpy as np
+from pathlib import Path
 import torch
 import torch.utils.data
 
 import layers
 from utils import load_wav_to_torch, load_filepaths_and_text
 from text import text_to_sequence
+from g2p_en import G2p
+from textgrid import TextGrid
 
+def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
+    with open("LJSpeech/wavs/" + audio_name + ".lab") as f:
+        text = f.readline().strip()
+        punc_positions = [pos: char for pos, char in enumerate(text) if char in string.punctuation]
+
+        found_phonemes = {}
+        # Find nearest word to punctuation
+        for pos, char in punc_positions.items():
+            letter = "1"
+            cur_pos = pos
+            not_found = False
+
+            while not letter.isalpha():
+                cur_pos -= 1
+                if cur_pos >= 0:
+                    letter = text[cur_pos]
+                else:
+                    not_found = True
+                    break
+
+            if not_found:
+                continue
+            
+            end = cur_pos
+            while letter != " ":
+                cur_pos -= 1
+
+                if cur_pos >= 0:
+                    letter = text[cur_pos]
+                else:
+                    cur_pos = -1
+                    break
+            begin = cur_pos + 1
+
+            # Found the word that comes before punctuation, now find its phoneme
+            word = text[begin:end+1]).translate(str.maketrans('', '', string.punctuation)).lower()
+
+            word_maxTime = word_intervals_dict[word]
+            phoneme_idx = phoneme_intervals_dict[word_maxTime]
+            found_phonemes[phoneme_idx] = char
+
+        return found_phonemes
 
 class TextMelLoader(torch.utils.data.Dataset):
     """
@@ -14,8 +61,14 @@ class TextMelLoader(torch.utils.data.Dataset):
         2) normalizes text and converts them to sequences of one-hot vectors
         3) computes mel-spectrograms from audio files.
     """
-    def __init__(self, audiopaths_and_text, hparams):
-        self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
+    def __init__(self, audiopaths_and_text, hparams, use_textgrid=False):
+        self.g2p = G2p()
+        self.use_textgrid = use_textgrid
+        if use_textgrid:
+            # TODO: HARDCODED PATH! SHOULD CHANGE THIS AT SOME POINT
+            self.textgrid_paths = glob.glob("LJSpeech/durations/*.TextGrid"):
+        else:
+            self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
         self.text_cleaners = hparams.text_cleaners
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
@@ -25,11 +78,51 @@ class TextMelLoader(torch.utils.data.Dataset):
             hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
             hparams.mel_fmax)
         random.seed(hparams.seed)
-        random.shuffle(self.audiopaths_and_text)
+        random.shuffle(self.textgrid_paths if use_textgrid else self.audiopaths_and_text)
+
+    def get_from_textgrid(self, path):
+        # Get audiopaths, durations, and phonemes
+        audio_name = Path(path).stem
+        # TODO: HARDCODED PATH! SHOULD CHANGE THIS AT SOME POINT
+        mel = self.get_mel("LJSpeech/wavs/" + audio_name + ".wav")
+
+        # [words, phones] - select [1] for phonemes
+        intervals = TextGrid.fromFile(file_path)
+        word_intervals = intervals[0]
+        phoneme_intervals = intervals[1]
+
+        word_intervals_dict = {w.mark: str(w.maxTime) for w in word_intervals}
+        phoneme_intervals_dict = {str(phoneme_intervals[i].maxTime): i for i in range(len(phoneme_intervals))}
+
+        # Returns: Python Dictionary(key: phoneme_idx, value: punctuation_char)
+        punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
+
+        phonemes = []
+        durations = []
+        for i in range(len(phoneme_intervals)):
+            interval = phoneme_intervals[i]
+            phoneme = interval.mark 
+            # Append the punctuation directly to the phoneme
+            if i in punctuations:
+                phoneme += punctuations[i]
+
+            duration = interval.maxTime - interval.minTime
+
+            # ITS BEAUTIFUL! WE HAVE EQUAL LENGTH TARGET DURATIONS AND INPUT PHONEMES
+            # INPUT PHONEMES HAVE PUNCTUATION ENCODINGS!!!
+            phonemes.append(phoneme)
+            durations.append(duration)
+
+        text = self.get_text(phonemes)
+        duration = self.get_duration(durations)
+
+        return (text, mel, duration)
+                
 
     def get_mel_text_pair(self, audiopath_and_text):
         # separate filename and text
         audiopath, text = audiopath_and_text[0], audiopath_and_text[1]
+
         text = self.get_text(text)
         mel = self.get_mel(audiopath)
         return (text, mel)
@@ -54,13 +147,21 @@ class TextMelLoader(torch.utils.data.Dataset):
         return melspec
 
     def get_text(self, text):
-        text_norm = torch.IntTensor(text_to_sequence(text, self.text_cleaners))
-        return text_norm
+        return torch.IntTensor(text_to_sequence(text, self.g2p, self.use_textgrid))
+
+    def get_duration(self, duration):
+        return torch.FloatTensor(duration)
 
     def __getitem__(self, index):
+        if self.use_textgrid:
+            return self.get_from_textgrid(self.textgrid_paths[index])
+
         return self.get_mel_text_pair(self.audiopaths_and_text[index])
 
     def __len__(self):
+        if self.use_textgrid:
+            return len(self.textgrid_paths)
+
         return len(self.audiopaths_and_text)
 
 

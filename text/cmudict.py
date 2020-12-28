@@ -1,6 +1,7 @@
 """ from https://github.com/keithito/tacotron """
 
 import re
+import string
 
 
 valid_symbols = [
@@ -12,6 +13,10 @@ valid_symbols = [
   'OY1', 'OY2', 'P', 'R', 'S', 'SH', 'T', 'TH', 'UH', 'UH0', 'UH1', 'UH2', 'UW',
   'UW0', 'UW1', 'UW2', 'V', 'W', 'Y', 'Z', 'ZH'
 ]
+
+for punc in string.punctuation:
+    orig_symbols = valid_symbols[:]
+    valid_symbols.append([o + punc for o in orig_symbols])
 
 _valid_symbol_set = set(valid_symbols)
 
