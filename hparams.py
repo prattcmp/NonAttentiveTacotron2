@@ -1,11 +1,14 @@
-import tensorflow as tf
+from collections import namedtuple
 from text import symbols
+
+def convert_to_objects(**kwargs):
+    return namedtuple("hparams", kwargs.keys())(*kwargs.values())
 
 
 def create_hparams(hparams_string=None, verbose=False):
     """Create model hyperparameters. Parse nondefault from given string."""
 
-    hparams = tf.contrib.training.HParams(
+    hparams = convert_to_objects(
         ################################
         # Experiment Parameters        #
         ################################
@@ -57,7 +60,8 @@ def create_hparams(hparams_string=None, verbose=False):
         range_rnn_dim=512,
         duration_lambda=2.0,
         positional_embedding_dim=32,
-        timestep_denominator=10000,
+        timestep_denominator=10000.0,
+        lambda_duration=2.0,
 
         # Decoder parameters
         n_frames_per_step=1,  # currently only 1 is supported
@@ -77,7 +81,7 @@ def create_hparams(hparams_string=None, verbose=False):
         attention_location_kernel_size=31,
 
         # Mel-post processing network parameters
-        postnet_embedding_dim=512,
+        postnet_embedding_dims=[512,512,512,512,128],
         postnet_kernel_size=5,
         postnet_n_convolutions=5,
 
@@ -88,15 +92,8 @@ def create_hparams(hparams_string=None, verbose=False):
         learning_rate=1e-3,
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
-        batch_size=64,
+        batch_size=32,
         mask_padding=True  # set model's padded outputs to padded values
     )
-
-    if hparams_string:
-        tf.logging.info('Parsing command line hparams: %s', hparams_string)
-        hparams.parse(hparams_string)
-
-    if verbose:
-        tf.logging.info('Final parsed hparams: %s', hparams.values())
 
     return hparams

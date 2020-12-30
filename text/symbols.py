@@ -12,5 +12,7 @@ _special = '-'
 
 _arpabet = [s for s in cmudict.valid_symbols]
 
+symbols = _arpabet
+
 # Export all symbols:
-symbols = [_pad] + list(_special) + list(_punctuation) + _arpabet
+#symbols = [_pad] + list(_special) + list(_punctuation) + _arpabet

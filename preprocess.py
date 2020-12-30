@@ -1,5 +1,7 @@
 import re
 import time
+import string
+from tqdm import tqdm
 
 from g2p_en import G2p
 import string
@@ -16,34 +18,75 @@ symbols = ['AA', 'AA0', 'AA1', 'AA2', 'AE', 'AE0', 'AE1', 'AE2', 'AH', 'AH0', 'A
   'UW0', 'UW1', 'UW2', 'V', 'W', 'Y', 'Z', 'ZH']
 
 text_dict = {}
-#punctuation = string.punctuation.replace("'", "").replace(" ", "")
+punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~"
 
+num_lines = sum(1 for line in open(file_path+"/metadata.csv", 'r'))
 with open(file_path+"/metadata.csv") as f:
-    for line in f:
+    for line in tqdm(f, total=num_lines):
         key, _, text = line.strip().split("|")
+        # Process text i.e. removes dashese and length abbreviations
+        abbrs = [a.span() for a in re.finditer(r"\b[A-Z\.]{2,}s?\b", text)]
+        for abbr in abbrs:
+            begin, end = abbr
+            word = text[begin:end+1]
+            if word.count('.') > 1:
+                word = word.replace('.', '')
+            word = list(word)
+
+            text = text[:begin] + ' '.join(word) + text[end + 1:]
+
+        # Replace parentheses with commas where possible, otherwise just remove them
+        parentheses = [p.span() for p in re.finditer(r"\([a-zA-Z0-9]+\)", text)]
+        for start_end in parentheses:
+            p1, p2 = start_end
+            p2 -= 1 # p2 is the character AFTER the closing parenthesis ")", so we need to subtract 1
+            
+            if p1-1 >= 0 and text[p1-1] == " ":
+                new_text = text[:p1-1] + ', ' + text[p1+1:p2] 
+            else:
+                new_text = text[:p1] + text[p1+1:p2] 
+            if p2+1 < len(text) and text[p2+1] == " ":
+                new_text += ',' + text[p2+1:]
+            else:
+                new_text += text[p2+1:]
+            
+            text = new_text
+
+        # Remove dashes (-) and hyphens (--)
+        text = ' '.join(text.replace('-', ' ').split())
+
+        # Remove random punctuation in between words (i.e. "noon:time" or "free?dom")
+        # This significantly improves robustness
+        new_text = []
+        for i in range(len(text)):
+            if i-1 < 0 or i+1 >= len(text) or text[i] == "'":
+                new_text.append(text[i])
+                continue
+
+            found = False
+            for p in punctuations:
+                if p == text[i] and text[i-1].isalpha() and text[i+1].isalpha():
+                    found = True
+                    break
+            if not found:
+                new_text.append(text[i])
+            else:
+                new_text.append(' ')
+
+        text = ''.join(new_text)
+
         with open(file_path+"/wavs/"+key+".lab", 'w', encoding='utf8') as fw:
             fw.write(text)
 
-        text = text.strip().translate(str.maketrans('', '', string.punctuation)).lower().split(" ")
+        text = text.strip().translate(str.maketrans('', '', punctuations)).lower().split(" ")
         phones = []
         for t in text:
             phone = g2p(t)
             phone = ' '.join([p for p in phone if p in symbols])
             phones.append(phone)
 
-#        phones = [g2p(t) for t in text]
-#        phones = [p for p in phones if p in symbols or p == " "]
-#        phones = [phones[i] for i in range(len(phones)) if i > 0 and phones[i] != " " or phones[i-1] != " "]
-#        phones = [p if p != " " else "," for p in phones]
-#        phones = ' '.join(phones).split(",")
-
-#        translator = str.maketrans('', '', punctuation)
-#        text = text.translate(translator).split(" ")
-#        text = [t for t in text if re.match(r"[a-zA-Z\']+", t)]
         text_dict.update({text[i]: phones[i] for i in range(len(text))})
 
 with open(file_path+"/dict/g2p_dict.txt", 'w', encoding='utf8') as fw:
     for text, phones in sorted(text_dict.items()):
-        if phones is None or phones == "":
-            print(text)
         fw.write(text + " " + phones + "\n")

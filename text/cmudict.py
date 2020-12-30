@@ -14,9 +14,10 @@ valid_symbols = [
   'UW0', 'UW1', 'UW2', 'V', 'W', 'Y', 'Z', 'ZH'
 ]
 
+orig_symbols = valid_symbols[:]
 for punc in string.punctuation:
-    orig_symbols = valid_symbols[:]
-    valid_symbols.append([o + punc for o in orig_symbols])
+    valid_symbols += [o + punc for o in orig_symbols]
+valid_symbols += ['sp', '', ' ', '<unk>', 'sil']
 
 _valid_symbol_set = set(valid_symbols)
 

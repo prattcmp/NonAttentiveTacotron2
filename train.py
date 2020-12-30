@@ -9,6 +9,7 @@ from distributed import apply_gradient_allreduce
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
+from warmup_scheduler import GradualWarmupScheduler
 
 from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
@@ -41,8 +42,8 @@ def init_distributed(hparams, n_gpus, rank, group_name):
 
 def prepare_dataloaders(hparams):
     # Get data, data loaders and collate function ready
-    trainset = TextMelLoader(hparams.training_files, hparams)
-    valset = TextMelLoader(hparams.validation_files, hparams)
+    trainset = TextMelLoader(hparams.training_files, hparams, use_textgrid=True)
+    valset = TextMelLoader(hparams.validation_files, hparams, use_textgrid=True, valset=True)
     collate_fn = TextMelCollate(hparams.n_frames_per_step)
 
     if hparams.distributed_run:
@@ -102,19 +103,21 @@ def load_checkpoint(checkpoint_path, model, optimizer):
     checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint_dict['state_dict'])
     optimizer.load_state_dict(checkpoint_dict['optimizer'])
+    scheduler.load_state_dict(checkpoint_dct['scheduler'])
     learning_rate = checkpoint_dict['learning_rate']
     iteration = checkpoint_dict['iteration']
     print("Loaded checkpoint '{}' from iteration {}" .format(
         checkpoint_path, iteration))
-    return model, optimizer, learning_rate, iteration
+    return model, optimizer, scheduler, learning_rate, iteration
 
 
-def save_checkpoint(model, optimizer, learning_rate, iteration, filepath):
+def save_checkpoint(model, optimizer, scheduler, learning_rate, iteration, filepath):
     print("Saving model and optimizer state at iteration {} to {}".format(
         iteration, filepath))
     torch.save({'iteration': iteration,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
                 'learning_rate': learning_rate}, filepath)
 
 
@@ -169,6 +172,8 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50000, gamma=0.5)
+    warmup_scheduler = GradualWarmupScheduler(optimizer, 1, 4000, after_scheduler=step_scheduler)
 
     if hparams.fp16_run:
         from apex import amp
@@ -178,7 +183,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    criterion = Tacotron2Loss()
+    criterion = Tacotron2Loss(hparams.lambda_duration)
 
     logger = prepare_directories_and_logger(
         output_directory, log_directory, rank)
@@ -193,7 +198,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             model = warm_start_model(
                 checkpoint_path, model, hparams.ignore_layers)
         else:
-            model, optimizer, _learning_rate, iteration = load_checkpoint(
+            model, optimizer, warmup_scheduler, _learning_rate, iteration = load_checkpoint(
                 checkpoint_path, model, optimizer)
             if hparams.use_saved_learning_rate:
                 learning_rate = _learning_rate
@@ -202,11 +207,17 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
 
     model.train()
     is_overflow = False
-    # ================ MAIN TRAINNIG LOOP! ===================
+
+    # Prevents warning with GradualWarmupScheduler
+    optimizer.zero_grad()
+    optimizer.step()
+
+    # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
             start = time.perf_counter()
+            warmup_scheduler.step(iteration)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = learning_rate
 
@@ -249,7 +260,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                 if rank == 0:
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
-                    save_checkpoint(model, optimizer, learning_rate, iteration,
+                    save_checkpoint(model, optimizer, warmup_scheduler, learning_rate, iteration,
                                     checkpoint_path)
 
             iteration += 1

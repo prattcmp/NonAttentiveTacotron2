@@ -2,18 +2,22 @@ from torch import nn
 
 
 class Tacotron2Loss(nn.Module):
-    def __init__(self):
+    def __init__(self, lambda_duration=2.0):
         super(Tacotron2Loss, self).__init__()
 
-    def forward(self, model_output, targets):
-        mel_target, gate_target = targets[0], targets[1]
-        mel_target.requires_grad = False
-        gate_target.requires_grad = False
-        gate_target = gate_target.view(-1, 1)
+        self.lambda_duration = lambda_duration
 
-        mel_out, mel_out_postnet, gate_out, _ = model_output
-        gate_out = gate_out.view(-1, 1)
+    def forward(self, model_output, targets):
+        mel_target, duration_target = targets[0], targets[1]
+        mel_target.requires_grad = False
+        duration_target.requires_grad = False
+
+        mel_out, mel_out_postnet, duration_out = model_output
         mel_loss = nn.MSELoss()(mel_out, mel_target) + \
-            nn.MSELoss()(mel_out_postnet, mel_target)
-        gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
-        return mel_loss + gate_loss
+            nn.MSELoss()(mel_out_postnet, mel_target) + \
+            nn.L1Loss()(mel_out, mel_target) + \
+            nn.L1Loss()(mel_out_postnet, mel_target)
+
+        dur_loss = nn.MSELoss()(duration_out, duration_target)
+
+        return mel_loss + self.lambda_duration * dur_loss
