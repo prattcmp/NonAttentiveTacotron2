@@ -9,6 +9,7 @@ from distributed import apply_gradient_allreduce
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
+from torch import autograd
 from warmup_scheduler import GradualWarmupScheduler
 
 from model import Tacotron2
@@ -162,6 +163,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     rank (int): rank of current gpu
     hparams (object): comma separated list of "name=value" pairs.
     """
+    autograd.set_detect_anomaly(True)
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
 
@@ -208,20 +210,16 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     model.train()
     is_overflow = False
 
-    # Prevents warning with GradualWarmupScheduler
-    optimizer.zero_grad()
-    optimizer.step()
-
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
             start = time.perf_counter()
-            warmup_scheduler.step(iteration)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = learning_rate
 
-            model.zero_grad()
+            optimizer.zero_grad()
+            warmup_scheduler.step(iteration)
             x, y = model.parse_batch(batch)
             y_pred = model(x)
 

@@ -37,8 +37,8 @@ class Duration(nn.Module):
 
     def positional_embedding(self, c, dim, T):
         positional_embedding = torch.zeros(T, dim, device=c.device)
-        i = torch.arange(1, dim+1, 2, device=c.device).float()
-        pos = torch.arange(1, T+1, device=c.device).unsqueeze(1).expand(-1, dim // 2)
+        i = torch.arange(0, dim, 2, device=c.device).float()
+        pos = torch.arange(0, T, device=c.device).unsqueeze(1).expand(-1, dim // 2)
 
 
         divisor = torch.pow(self.timestep_denominator, i / float(dim))
@@ -60,12 +60,13 @@ class Duration(nn.Module):
         t = torch.arange(1, T+1, device=c.device).unsqueeze(0).transpose(0, 1)
 
         c = c - (d / 2)
-        dividend = torch.exp(-std_dev**-2. * (t-c)**2.).t()
-        divisor = torch.sum(torch.exp(-std_dev**-2. * (t - c)**2.), 1)
-        w = dividend / divisor
-        U = torch.matmul(w.t(), H)
+        t_c = (t - c) ** 2.
+        pow_std_dev = (-std_dev ** -2.).unsqueeze(0).expand(t_c.size(0), -1)
+        power = (t_c * pow_std_dev)
+        w = F.softmax(power, -1) 
+        U = torch.matmul(w, H)
 
-        return U
+        return U, w
 
     def forward(self, h, d, max_T):
         # Convert frame size in seconds to integer frames
@@ -74,6 +75,8 @@ class Duration(nn.Module):
         # U = (batch_size, time_steps, emb_size)
         # Add 1 to last dimension of U for positional embedding
         U = torch.empty(h.size(0), max_T, self.encoder_embedding_dim + self.positional_embedding_dim, device=d.device)
+        weights = torch.empty(h.size(0), max_T, h.size(1), device=d.device)
+        print(h.size(1))
 
         self.duration_lstm.flatten_parameters()
         duration_h, _ = self.duration_lstm(h)
@@ -82,25 +85,63 @@ class Duration(nn.Module):
         pred_duration_output = pred_duration_output.squeeze()
 
         self.range_lstm.flatten_parameters()
-        range_h, _ = self.range_lstm(torch.cat((h, d.unsqueeze(-1)), -1))
+        range_h, _ = self.range_lstm(torch.cat((h, d.unsqueeze(-1).float()), -1))
         range_output = F.softplus(self.range_projection(range_h))
         range_output = range_output.squeeze()
 
-
-
         for i in range(len(h)):
-            gaussian = self.gaussian_upsampling(h[i], d[i], c[i], range_output[i], max_T)
+            gaussian, weight = self.gaussian_upsampling(h[i], d[i], c[i], range_output[i], max_T)
             positional = self.positional_embedding(c[i], self.positional_embedding_dim, max_T)
             
             assert len(gaussian) == len(positional), "Gaussian output and positional output should be same size"
 
             for j in range(len(gaussian)):
-                g, p = gaussian[j], positional[j]
+                g, w, p = gaussian[j], weight[j], positional[j]
                 length = g.size(0)
 
                 U[i, :length, ...] = torch.cat((g, p), -1)
+                weights[i, :length, ...] = w
 
-        return U, pred_duration_output
+
+
+        return U, pred_duration_output, weights
+
+    def inference(self, h):
+        self.duration_lstm.flatten_parameters()
+        duration_h, _ = self.duration_lstm(h)
+        d = self.duration_projection(duration_h)
+        # (batch_size, seq_len, 1) -> (batch_size, seq_len)
+        d = d.squeeze()
+
+        self.range_lstm.flatten_parameters()
+        range_h, _ = self.range_lstm(torch.cat((h, d.unsqueeze(-1)), -1))
+        range_output = F.softplus(self.range_projection(range_h))
+        range_output = range_output.squeeze()
+
+        # Convert frame size in seconds to integer frames
+        d = torch.round(d * self.frame_size).long()
+        # Find the longest sequence (in frames)
+        c = torch.cumsum(d, -1)
+        max_T = ceil(torch.max(c))
+
+        # U = (batch_size, time_steps, emb_size)
+        U = torch.empty(h.size(0), max_T, self.encoder_embedding_dim + self.positional_embedding_dim, device=d.device)
+        weights = torch.empty(h.size(0), max_T, self.encoder_embedding_dim, device=d.device)
+
+        for i in range(len(h)):
+            gaussian, weight = self.gaussian_upsampling(h[i], d[i], c[i], range_output[i], max_T)
+            positional = self.positional_embedding(c[i], self.positional_embedding_dim, max_T)
+            
+            assert len(gaussian) == len(positional), "Gaussian output and positional output should be same size"
+
+            for j in range(len(gaussian)):
+                g, w, p = gaussian[j], weight[j], positional[j]
+                length = g.size(0)
+
+                U[i, :length, ...] = torch.cat((g, p), -1)
+                weights[i, :length, ...] = w
+
+        return U, weights
 
 
 class Prenet(nn.Module):
@@ -112,7 +153,9 @@ class Prenet(nn.Module):
              for (in_size, out_size) in zip(in_sizes, sizes)])
 
     def forward(self, x):
+        i = 0
         for linear in self.layers:
+            i += 1
             x = F.dropout(F.relu(linear(x)), p=0.5, training=True)
         return x
 
@@ -238,10 +281,16 @@ class Decoder(nn.Module):
         self.decoder_rnn1 = nn.LSTMCell(
             hparams.prenet_dim + hparams.encoder_embedding_dim + hparams.positional_embedding_dim,
             hparams.decoder_rnn_dim, 1)
+        for name, param in self.decoder_rnn1.named_parameters():
+          if 'weight' in name:
+             nn.init.uniform_(param, 0.0, 0.1)
 
         self.decoder_rnn2 = nn.LSTMCell(
             hparams.decoder_rnn_dim,
             hparams.decoder_rnn_dim, 1)
+        for name, param in self.decoder_rnn2.named_parameters():
+          if 'weight' in name:
+             nn.init.constant_(param, 0.1)
 
         self.linear_projection = LinearNorm(
             hparams.decoder_rnn_dim + hparams.encoder_embedding_dim + hparams.positional_embedding_dim,
@@ -294,8 +343,10 @@ class Decoder(nn.Module):
         """
         cell_input = torch.cat((decoder_input, duration_input), -1)
 
+
         self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
             cell_input, (self.decoder_hidden1, self.decoder_cell1))
+
         if self.training:
             self.decoder_hidden1 = zoneout(
                 self.decoder_hidden1[0], self.decoder_hidden1, p=0.1)
@@ -351,6 +402,7 @@ class Decoder(nn.Module):
         while len(mel_outputs) < decoder_inputs.size(0) - 1:
             mel_outputs_len = len(mel_outputs)
             decoder_input = decoder_inputs[mel_outputs_len]
+
             duration_input = duration_outputs[mel_outputs_len]
             mel_output = self.decode(
                 decoder_input, duration_input)
@@ -366,11 +418,11 @@ class Decoder(nn.Module):
 
         return mel_outputs
 
-    def inference(self, memory):
-        """ Decoder inference
+    def inference(self, duration_outputs):
+        """ Decoder forward pass for training
         PARAMS
         ------
-        memory: Encoder outputs
+        duration_outputs: Duration aligner outputs
 
         RETURNS
         -------
@@ -379,31 +431,38 @@ class Decoder(nn.Module):
         alignments: sequence of attention weights from the decoder
         memory == duration_outputs
         """
-        decoder_input = self.get_go_frame(memory)
 
-        self.initialize_decoder_states(memory, mask=None)
+        decoder_input = self.get_go_frame(duration_outputs.size(0), decoder_inputs.device).unsqueeze(0)
 
-        mel_outputs, gate_outputs, alignments = [], [], []
-        while True:
+        self.decoder_hidden1 = torch.zeros(B, self.decoder_rnn_dim, device=duration_outputs.device)
+        self.decoder_cell1 = torch.zeros(B, self.decoder_rnn_dim, device=duration_outputs.device)
+        self.decoder_hidden2 = torch.zeros(B, self.decoder_rnn_dim, device=duration_outputs.device)
+        self.decoder_cell2 = torch.zeros(B, self.decoder_rnn_dim, device=duration_outputs.device)
+
+        duration_outputs = duration_outputs.transpose(0, 1)
+
+        mel_outputs = []
+        while len(mel_outputs) < decoder_outputs.size(0):
+            mel_outputs_len = len(mel_outputs)
+
             decoder_input = self.prenet(decoder_input)
-            mel_output, gate_output, alignment = self.decode(decoder_input)
 
+            duration_input = duration_outputs[mel_outputs_len]
+
+            mel_output = self.decode(decoder_input, duration_input)
             mel_outputs += [mel_output.squeeze(1)]
-            gate_outputs += [gate_output]
-            alignments += [alignment]
-
-            if torch.sigmoid(gate_output.data) > self.gate_threshold:
-                break
-            elif len(mel_outputs) == self.max_decoder_steps:
-                print("Warning! Reached max decoder steps")
-                break
 
             decoder_input = mel_output
 
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments)
+        # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
+        mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
+        # decouple frames per step
+        mel_outputs = mel_outputs.view(
+            mel_outputs.size(0), -1, self.n_mel_channels)
+        # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
+        mel_outputs = mel_outputs.transpose(1, 2)
 
-        return mel_outputs, gate_outputs, alignments
+        return mel_outputs
 
 
 class Tacotron2(nn.Module):
@@ -458,7 +517,7 @@ class Tacotron2(nn.Module):
 
         MAX_T = mels.size(-1)
         
-        duration_outputs, predicted_durations = self.duration_aligner(encoder_outputs, durations, MAX_T)
+        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T)
 
         mel_outputs = self.decoder(duration_outputs, mels, memory_lengths=text_lengths)
 
@@ -466,19 +525,21 @@ class Tacotron2(nn.Module):
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
         return self.parse_output(
-            [mel_outputs, mel_outputs_postnet, predicted_durations],
+            [mel_outputs, mel_outputs_postnet, predicted_durations, alignments],
             output_lengths)
 
     def inference(self, inputs):
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
         encoder_outputs = self.encoder.inference(embedded_inputs)
-        mel_outputs, gate_outputs, alignments = self.decoder.inference(
-            encoder_outputs)
+
+        duration_outputs, alignments = self.duration_aligner.inference(encoder_outputs)
+
+        mel_outputs = self.decoder.inference(duration_outputs)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
         outputs = self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
+            [mel_outputs, mel_outputs_postnet, alignments])
 
         return outputs
