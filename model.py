@@ -1,4 +1,4 @@
-from math import sqrt, ceil
+from math import sqrt, ceil, log
 import torch
 from torch.autograd import Variable
 from torch import nn
@@ -35,16 +35,18 @@ class Duration(nn.Module):
 
         self.range_projection = LinearNorm(2*hparams.range_rnn_dim, 1, bias=False)
 
+        self.score_mask_value = -float("inf")
+
     def positional_embedding(self, c, dim, T):
-        positional_embedding = torch.zeros(T, dim, device=c.device)
+        positional_embedding = torch.zeros(c.size(0), T, dim, device=c.device)
         i = torch.arange(0, dim, 2, device=c.device).float()
         pos = torch.arange(0, T, device=c.device).unsqueeze(1).expand(-1, dim // 2)
 
 
-        divisor = torch.pow(self.timestep_denominator, i / float(dim))
+        divisor = torch.exp(i * -(log(self.timestep_denominator) / float(dim)))
 
-        positional_embedding[:, 0::2] = torch.sin(pos.float() / divisor)
-        positional_embedding[:, 1::2] = torch.cos(pos.float() / divisor)
+        positional_embedding[:, :, 0::2] = torch.sin(pos.float() * divisor)
+        positional_embedding[:, :, 1::2] = torch.cos(pos.float() * divisor)
 
         return positional_embedding
 
@@ -55,28 +57,35 @@ class Duration(nn.Module):
 
 
         # T = c_N, N = seq_len
-        N = H.size(0)
+        N = H.size(1)
         # U = (time_steps, emb_size)
         t = torch.arange(1, T+1, device=c.device).unsqueeze(0).transpose(0, 1)
+        t = t.unsqueeze(0).expand(H.size(0), -1, -1)
 
         c = c - (d / 2)
-        t_c = (t - c) ** 2.
-        pow_std_dev = (-std_dev ** -2.).unsqueeze(0).expand(t_c.size(0), -1)
+        c = c.unsqueeze(1)
+        t_c = torch.sub(t, c) ** 2.
+        pow_std_dev = (-std_dev ** -2.).unsqueeze(1).expand_as(t_c)
         power = (t_c * pow_std_dev)
+
+        if self.mask is not None:
+            power.data.masked_fill_(self.mask.unsqueeze(1).expand_as(t_c), self.score_mask_value)
         w = F.softmax(power, -1) 
-        U = torch.matmul(w, H)
+        U = torch.bmm(w, H)
 
         return U, w
 
-    def forward(self, h, d, max_T):
+    def forward(self, h, d, max_T, mask):
+        self.mask=~get_mask_from_lengths(mask)
+
         # Convert frame size in seconds to integer frames
         d = torch.round(d * self.frame_size).long()
         c = torch.cumsum(d, -1)
         # U = (batch_size, time_steps, emb_size)
         # Add 1 to last dimension of U for positional embedding
-        U = torch.empty(h.size(0), max_T, self.encoder_embedding_dim + self.positional_embedding_dim, device=d.device)
+        gaussian_upsampling = torch.empty(h.size(0), max_T, self.encoder_embedding_dim, device=d.device)
+        positional_embedding = torch.empty(h.size(0), max_T,  self.positional_embedding_dim, device=d.device)
         weights = torch.empty(h.size(0), max_T, h.size(1), device=d.device)
-        print(h.size(1))
 
         self.duration_lstm.flatten_parameters()
         duration_h, _ = self.duration_lstm(h)
@@ -89,19 +98,12 @@ class Duration(nn.Module):
         range_output = F.softplus(self.range_projection(range_h))
         range_output = range_output.squeeze()
 
-        for i in range(len(h)):
-            gaussian, weight = self.gaussian_upsampling(h[i], d[i], c[i], range_output[i], max_T)
-            positional = self.positional_embedding(c[i], self.positional_embedding_dim, max_T)
-            
-            assert len(gaussian) == len(positional), "Gaussian output and positional output should be same size"
+        gaussian_upsampling, weights = self.gaussian_upsampling(h, d, c, range_output, max_T)
+        positional_embedding = self.positional_embedding(c, self.positional_embedding_dim, max_T)
+        
+        assert gaussian_upsampling.size(1) == positional_embedding.size(1), "Gaussian output and positional output should be same size"
 
-            for j in range(len(gaussian)):
-                g, w, p = gaussian[j], weight[j], positional[j]
-                length = g.size(0)
-
-                U[i, :length, ...] = torch.cat((g, p), -1)
-                weights[i, :length, ...] = w
-
+        U = torch.cat((gaussian_upsampling, positional_embedding), -1)
 
 
         return U, pred_duration_output, weights
@@ -504,6 +506,7 @@ class Tacotron2(nn.Module):
 
             outputs[0].data.masked_fill_(mask, 0.0)
             outputs[1].data.masked_fill_(mask, 0.0)
+            outputs[3].data.masked_fill_(mask, 0.0)
 
         return outputs
 
@@ -517,7 +520,7 @@ class Tacotron2(nn.Module):
 
         MAX_T = mels.size(-1)
         
-        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T)
+        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T, text_lengths)
 
         mel_outputs = self.decoder(duration_outputs, mels, memory_lengths=text_lengths)
 
