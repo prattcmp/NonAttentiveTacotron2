@@ -168,6 +168,8 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     rank (int): rank of current gpu
     hparams (object): comma separated list of "name=value" pairs.
     """
+    torch.autograd.set_detect_anomaly(True)
+
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
 
@@ -178,7 +180,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
-    scaler = amp.GradScaler()
+    scaler = amp.GradScaler(enabled=False)
     step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50000, gamma=0.5)
     warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
@@ -193,15 +195,15 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     train_loader, valset, collate_fn = prepare_dataloaders(hparams)
 
     # Load checkpoint if one exists
-    iteration = 0
-    epoch_offset = 0
+    iteration = 1
+    epoch_offset = 1
     if checkpoint_path is not None:
         if warm_start:
             model = warm_start_model(
                 checkpoint_path, model, hparams.ignore_layers)
         else:
             model, optimizer, scaler, step_scheduler, warmup_scheduler, _learning_rate, iteration = load_checkpoint(
-                checkpoint_path, model, optimizer)
+                checkpoint_path, model, optimizer, scaler, step_scheduler, warmup_scheduler)
             if hparams.use_saved_learning_rate:
                 learning_rate = _learning_rate
             iteration += 1  # next iteration is iteration + 1
@@ -213,13 +215,13 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
-        for i, batch in enumerate(tqdm(train_loader)):
+        for i, batch in enumerate(tqdm(train_loader), 1):
             start = time.perf_counter()
 
             optimizer.zero_grad()
 
 
-            with amp.autocast():
+            with amp.autocast(enabled=False):
                 x, y = model.parse_batch(batch)
                 if args.profiling:
                     with torch.autograd.profiler.profile(use_cuda=True) as prof:
@@ -240,7 +242,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hparams.grad_clip_thresh)
             scaler.step(optimizer)
             scaler.update()
-            step_scheduler.step()
+            step_scheduler.step(step_scheduler.last_epoch + 1)
             warmup_scheduler.dampen()
 
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
@@ -255,13 +257,13 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
 
             iteration += 1
 
-        if not is_overflow and rank == 0:
-            learning_rate = optimizer.param_groups[0]['lr']
-            duration = time.perf_counter() - start
-            print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
-                iteration - 1, reduced_loss, grad_norm, duration))
-            logger.log_training(
-                reduced_loss, grad_norm, learning_rate, duration, iteration - 1)
+            if not is_overflow and rank == 0:
+                learning_rate = optimizer.param_groups[0]['lr']
+                duration = time.perf_counter() - start
+                print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
+                    iteration - 1, reduced_loss, grad_norm, duration))
+                logger.log_training(
+                    reduced_loss, grad_norm, learning_rate, duration, iteration - 1)
 
 
 if __name__ == '__main__':

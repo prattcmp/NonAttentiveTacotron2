@@ -17,6 +17,19 @@ class LinearNorm(torch.nn.Module):
     def forward(self, x):
         return self.linear_layer(x)
 
+class LSTMCellNorm(torch.nn.Module):
+    def __init__(self, in_dim, out_dim, w_init_gain='linear'):
+        super(LSTMCellNorm, self).__init__()
+        self.lstm = torch.nn.LSTMCell(in_dim, out_dim, 1)
+        for name, param in self.lstm.named_parameters():
+          if 'weight' in name:
+            torch.nn.init.xavier_uniform_(
+                param,
+                gain=torch.nn.init.calculate_gain('linear'))
+
+    def forward(self, x, y):
+        return self.lstm(x, y)
+
 
 class ConvNorm(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1,

@@ -3,7 +3,7 @@ import torch
 from torch.autograd import Variable
 from torch import nn
 from torch.nn import functional as F
-from layers import ConvNorm, LinearNorm
+from layers import ConvNorm, LinearNorm, LSTMCellNorm
 from utils import to_gpu, get_mask_from_lengths
 
 
@@ -32,8 +32,10 @@ class Duration(nn.Module):
                             batch_first=True, bidirectional=True)
 
         self.duration_projection = LinearNorm(2* hparams.duration_rnn_dim, 1, bias=False)
+        #self.duration_projection = torch.nn.Linear(2*hparams.duration_rnn_dim, 1)
 
         self.range_projection = LinearNorm(2*hparams.range_rnn_dim, 1, bias=False)
+        #self.range_projection = torch.nn.Linear(2*hparams.range_rnn_dim, 1)
 
         self.score_mask_value = -float("inf")
 
@@ -57,45 +59,63 @@ class Duration(nn.Module):
 
 
         # T = c_N, N = seq_len
-        N = H.size(1)
+        #N = H.size(1)
         # U = (time_steps, emb_size)
         t = torch.arange(1, T+1, device=c.device).unsqueeze(0).transpose(0, 1)
-        t = t.unsqueeze(0).expand(H.size(0), -1, -1)
+        t = t.unsqueeze(0).expand(d.size(0), -1, -1)
+
 
         c = c - (d / 2)
         c = c.unsqueeze(1)
-        t_c = torch.sub(t, c) ** 2.
-        pow_std_dev = (-std_dev ** -2.).unsqueeze(1).expand_as(t_c)
-        power = (t_c * pow_std_dev)
+        std_dev = std_dev.unsqueeze(1)
+        #t_c = torch.sub(t, c) ** 2.
+        #pow_std_dev = (-1 / (std_dev ** 2.)).unsqueeze(1).expand_as(t_c)
+        #print(pow_std_dev)
+        #power = (t_c * pow_std_dev)
+        power = (torch.abs(t-c)**2. / -1 * (std_dev**2.))
 
         if self.mask is not None:
-            power.data.masked_fill_(self.mask.unsqueeze(1).expand_as(t_c), self.score_mask_value)
+            power.data.masked_fill_(self.mask.unsqueeze(1).expand_as(power), self.score_mask_value)
         w = F.softmax(power, -1) 
         U = torch.matmul(w, H)
 
         return U, w
 
-    def forward(self, h, d, max_T, mask):
-        self.mask=~get_mask_from_lengths(mask)
+    def forward(self, h, d_sec, max_T, input_lengths):
+        self.mask=~get_mask_from_lengths(input_lengths)
 
         # Convert frame size in seconds to integer frames
-        d = torch.round(d * self.frame_size).long()
+        d = torch.round(d_sec * self.frame_size).long()
         c = torch.cumsum(d, -1)
         # U = (batch_size, time_steps, emb_size)
         # Add 1 to last dimension of U for positional embedding
-        gaussian_upsampling = torch.empty(h.size(0), max_T, self.encoder_embedding_dim, device=d.device)
-        positional_embedding = torch.empty(h.size(0), max_T,  self.positional_embedding_dim, device=d.device)
-        weights = torch.empty(h.size(0), max_T, h.size(1), device=d.device)
+        #gaussian_upsampling = torch.empty(h.size(0), max_T, self.encoder_embedding_dim, device=d.device)
+        #positional_embedding = torch.empty(h.size(0), max_T,  self.positional_embedding_dim, device=d.device)
+        #weights = torch.empty(h.size(0), max_T, h.size(1), device=d.device)
+
+        range_in = torch.cat((h, d.unsqueeze(-1)), -1)
+        input_lengths = input_lengths.cpu().numpy()
+        range_in = nn.utils.rnn.pack_padded_sequence(
+            range_in, input_lengths, batch_first=True)
+        h1 = nn.utils.rnn.pack_padded_sequence(
+            h, input_lengths, batch_first=True)
 
         self.duration_lstm.flatten_parameters()
-        duration_h, _ = self.duration_lstm(h)
+        duration_h, _ = self.duration_lstm(h1)
+        duration_h, _ = nn.utils.rnn.pad_packed_sequence(
+            duration_h, batch_first=True)
         pred_duration_output = self.duration_projection(duration_h)
         # (batch_size, seq_len, 1) -> (batch_size, seq_len)
         pred_duration_output = pred_duration_output.squeeze()
 
+
         self.range_lstm.flatten_parameters()
-        range_h, _ = self.range_lstm(torch.cat((h, d.unsqueeze(-1).float()), -1))
-        range_output = F.softplus(self.range_projection(range_h))
+
+        range_h, _ = self.range_lstm(range_in)
+        range_h, _ = nn.utils.rnn.pad_packed_sequence(
+            range_h, batch_first=True)
+        range_proj = self.range_projection(range_h)
+        range_output = F.softplus(range_proj)
         range_output = range_output.squeeze()
 
         gaussian_upsampling, weights = self.gaussian_upsampling(h, d, c, range_output, max_T)
@@ -104,7 +124,6 @@ class Duration(nn.Module):
         assert gaussian_upsampling.size(1) == positional_embedding.size(1), "Gaussian output and positional output should be same size"
 
         U = torch.cat((gaussian_upsampling, positional_embedding), -1)
-
 
         return U, pred_duration_output, weights
 
@@ -200,11 +219,6 @@ class Postnet(nn.Module):
                 nn.BatchNorm1d(hparams.n_mel_channels))
             )
 
-        for conv in self.convolutions:
-            for name, param in conv.named_parameters():
-                if 'weight' in name:
-                    nn.init.constant_(param, 0.1)
-
     def forward(self, x):
         for i in range(len(self.convolutions) - 1):
             x = F.dropout(torch.tanh(self.convolutions[i](x)), 0.5, self.training)
@@ -254,7 +268,8 @@ class Encoder(nn.Module):
         outputs, _ = nn.utils.rnn.pad_packed_sequence(
             outputs, batch_first=True)
         if self.training:
-            outputs = zoneout(outputs[0], outputs, p=0.1)
+            outputs = F.dropout(outputs, 0.1, self.training)
+            #outputs = zoneout(outputs[0], outputs, p=0.1)
 
         return outputs
 
@@ -285,19 +300,13 @@ class Decoder(nn.Module):
             hparams.n_mel_channels * hparams.n_frames_per_step,
             [hparams.prenet_dim, hparams.prenet_dim])
 
-        self.decoder_rnn1 = nn.LSTMCell(
+        self.decoder_rnn1 = LSTMCellNorm(
             hparams.prenet_dim + hparams.encoder_embedding_dim + hparams.positional_embedding_dim,
             hparams.decoder_rnn_dim, 1)
-        for name, param in self.decoder_rnn1.named_parameters():
-          if 'weight' in name:
-             nn.init.constant_(param, 0.1)
 
-        self.decoder_rnn2 = nn.LSTMCell(
+        self.decoder_rnn2 = LSTMCellNorm(
             hparams.decoder_rnn_dim,
             hparams.decoder_rnn_dim, 1)
-        for name, param in self.decoder_rnn2.named_parameters():
-          if 'weight' in name:
-             nn.init.constant_(param, 0.1)
 
         self.linear_projection = LinearNorm(
             hparams.decoder_rnn_dim + hparams.encoder_embedding_dim + hparams.positional_embedding_dim,
@@ -416,7 +425,9 @@ class Decoder(nn.Module):
             mel_outputs += [mel_output.squeeze(1)]
 
         # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
-        mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
+        mel_outputs = torch.stack(mel_outputs)
+
+        mel_outputs = mel_outputs.transpose(0, 1).contiguous()
         # decouple frames per step
         mel_outputs = mel_outputs.view(
             mel_outputs.size(0), -1, self.n_mel_channels)
@@ -511,7 +522,6 @@ class Tacotron2(nn.Module):
 
             outputs[0].data.masked_fill_(mask, 0.0)
             outputs[1].data.masked_fill_(mask, 0.0)
-            outputs[3].data.masked_fill_(mask, 0.0)
 
         return outputs
 
@@ -528,6 +538,7 @@ class Tacotron2(nn.Module):
         duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T, text_lengths)
 
         mel_outputs = self.decoder(duration_outputs, mels, memory_lengths=text_lengths)
+
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
