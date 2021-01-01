@@ -14,7 +14,7 @@ from g2p_en import G2p
 from textgrid import TextGrid
 
 def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
-    punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~"
+    punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~'"
 
     with open("LJSpeech/wavs/" + audio_name + ".lab") as f:
         text = f.readline().strip()
@@ -27,7 +27,7 @@ def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
             cur_pos = pos
             not_found = False
 
-            while not letter.isalpha():
+            while not letter.isalpha() and not letter == "'":
                 cur_pos -= 1
                 if cur_pos >= 0:
                     letter = text[cur_pos]
@@ -53,8 +53,8 @@ def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
             new_text = text[begin:end+1]
             word = new_text.translate(str.maketrans('', '', punctuations)).lower()
 
-#            if word == "anoura":
-#                print(word, text, word_intervals_dict)
+#            if word == "co":
+#                print(new_text, word, text, word_intervals_dict)
 
             word_maxTime = word_intervals_dict[word]
             phoneme_idx = phoneme_intervals_dict[word_maxTime]

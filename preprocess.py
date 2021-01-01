@@ -18,13 +18,13 @@ symbols = ['AA', 'AA0', 'AA1', 'AA2', 'AE', 'AE0', 'AE1', 'AE2', 'AH', 'AH0', 'A
   'UW0', 'UW1', 'UW2', 'V', 'W', 'Y', 'Z', 'ZH']
 
 text_dict = {}
-punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~"
+punctuations = "!\"“”‘’#$%&()*+,-./:;<=>?@[\]^_{|}~'"
 
 num_lines = sum(1 for line in open(file_path+"/metadata.csv", 'r'))
 with open(file_path+"/metadata.csv") as f:
     for line in tqdm(f, total=num_lines):
         key, _, text = line.strip().split("|")
-        # Process text i.e. removes dashese and length abbreviations
+        # Process text i.e. removes dashes and length abbreviations
         abbrs = [a.span() for a in re.finditer(r"\b[A-Z\.]{2,}s?\b", text)]
         for abbr in abbrs:
             begin, end = abbr
@@ -34,26 +34,6 @@ with open(file_path+"/metadata.csv") as f:
             word = list(word)
 
             text = text[:begin] + ' '.join(word) + text[end + 1:]
-
-        # Replace parentheses with commas where possible, otherwise just remove them
-        parentheses = [p.span() for p in re.finditer(r"\([a-zA-Z0-9]+\)", text)]
-        for start_end in parentheses:
-            p1, p2 = start_end
-            p2 -= 1 # p2 is the character AFTER the closing parenthesis ")", so we need to subtract 1
-            
-            if p1-1 >= 0 and text[p1-1] == " ":
-                new_text = text[:p1-1] + ', ' + text[p1+1:p2] 
-            else:
-                new_text = text[:p1] + text[p1+1:p2] 
-            if p2+1 < len(text) and text[p2+1] == " ":
-                new_text += ',' + text[p2+1:]
-            else:
-                new_text += text[p2+1:]
-            
-            text = new_text
-
-        # Remove dashes (-) and hyphens (--)
-        text = ' '.join(text.replace('-', ' ').split())
 
         # Remove random punctuation in between words (i.e. "noon:time" or "free?dom")
         # This significantly improves robustness
@@ -74,6 +54,29 @@ with open(file_path+"/metadata.csv") as f:
                 new_text.append(' ')
 
         text = ''.join(new_text)
+
+        # Replace parentheses with commas where possible, otherwise just remove them
+        pattern = re.compile(r"(\(|\[)[a-zA-Z0-9\']+(\)|\])")
+        parentheses = pattern.search(text)
+        while parentheses:
+            p1, p2 = parentheses.start(), parentheses.end()
+            p2 -= 1 # p2 is the character AFTER the closing parenthesis ")", so we need to subtract 1
+            
+            if p1-1 >= 0 and text[p1-1] == " ":
+                new_text = text[:p1-1] + ', ' + text[p1+1:p2] 
+            else:
+                new_text = text[:p1] + text[p1+1:p2] 
+            if p2+1 < len(text) and text[p2+1] == " ":
+                new_text += ',' + text[p2+1:]
+            else:
+                new_text += text[p2+1:]
+            
+            text = new_text
+            parentheses = pattern.search(text)
+
+        # Remove dashes (-) and hyphens (--) and single quotes (')
+        text = ' '.join(text.replace("'", "").replace('-', ' ').split())
+
 
         with open(file_path+"/wavs/"+key+".lab", 'w', encoding='utf8') as fw:
             fw.write(text)

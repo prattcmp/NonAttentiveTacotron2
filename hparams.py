@@ -23,6 +23,7 @@ def create_hparams(hparams_string=None, verbose=False):
         cudnn_enabled=True,
         cudnn_benchmark=False,
         ignore_layers=['embedding.weight'],
+        num_workers=6,
 
         ################################
         # Data Parameters             #

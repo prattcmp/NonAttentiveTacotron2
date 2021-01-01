@@ -71,7 +71,7 @@ class Duration(nn.Module):
         if self.mask is not None:
             power.data.masked_fill_(self.mask.unsqueeze(1).expand_as(t_c), self.score_mask_value)
         w = F.softmax(power, -1) 
-        U = torch.bmm(w, H)
+        U = torch.matmul(w, H)
 
         return U, w
 
@@ -200,6 +200,11 @@ class Postnet(nn.Module):
                 nn.BatchNorm1d(hparams.n_mel_channels))
             )
 
+        for conv in self.convolutions:
+            for name, param in conv.named_parameters():
+                if 'weight' in name:
+                    nn.init.constant_(param, 0.1)
+
     def forward(self, x):
         for i in range(len(self.convolutions) - 1):
             x = F.dropout(torch.tanh(self.convolutions[i](x)), 0.5, self.training)
@@ -285,7 +290,7 @@ class Decoder(nn.Module):
             hparams.decoder_rnn_dim, 1)
         for name, param in self.decoder_rnn1.named_parameters():
           if 'weight' in name:
-             nn.init.uniform_(param, 0.0, 0.1)
+             nn.init.constant_(param, 0.1)
 
         self.decoder_rnn2 = nn.LSTMCell(
             hparams.decoder_rnn_dim,

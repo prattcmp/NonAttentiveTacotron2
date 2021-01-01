@@ -9,15 +9,17 @@ from distributed import apply_gradient_allreduce
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
-from torch.cuda import amp
+import torch.cuda.amp as amp
 from torch import autograd
-from warmup_scheduler import GradualWarmupScheduler
+import pytorch_warmup as warmup
 
 from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
 from hparams import create_hparams
+
+from tqdm import tqdm
 
 
 def reduce_tensor(tensor, n_gpus):
@@ -55,9 +57,9 @@ def prepare_dataloaders(hparams):
         train_sampler = None
         shuffle = True
 
-    train_loader = DataLoader(trainset, num_workers=1, shuffle=shuffle,
+    train_loader = DataLoader(trainset, num_workers=hparams.num_workers, shuffle=shuffle,
                               sampler=train_sampler,
-                              batch_size=hparams.batch_size, pin_memory=False,
+                              batch_size=hparams.batch_size, pin_memory=True,
                               drop_last=True, collate_fn=collate_fn)
     return train_loader, valset, collate_fn
 
@@ -97,27 +99,31 @@ def warm_start_model(checkpoint_path, model, ignore_layers):
     return model
 
 
-def load_checkpoint(checkpoint_path, model, optimizer):
+def load_checkpoint(checkpoint_path, model, optimizer, scaler, step_scheduler, warmup_scheduler):
     assert os.path.isfile(checkpoint_path)
     print("Loading checkpoint '{}'".format(checkpoint_path))
     checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint_dict['state_dict'])
     optimizer.load_state_dict(checkpoint_dict['optimizer'])
-    scheduler.load_state_dict(checkpoint_dct['scheduler'])
+    scaler.load_state_dict(checkpoint_dict['scaler'])
+    step_scheduler.load_state_dict(checkpoint_dict['step_scheduler'])
+    warmup_scheduler.load_state_dict(checkpoint_dict['warmup_scheduler'])
     learning_rate = checkpoint_dict['learning_rate']
     iteration = checkpoint_dict['iteration']
     print("Loaded checkpoint '{}' from iteration {}" .format(
         checkpoint_path, iteration))
-    return model, optimizer, scheduler, learning_rate, iteration
+    return model, optimizer, scaler, step_scheduler, warmup_scheduler, learning_rate, iteration
 
 
-def save_checkpoint(model, optimizer, scheduler, learning_rate, iteration, filepath):
+def save_checkpoint(model, optimizer, scaler, step_scheduler, warmup_scheduler, learning_rate, iteration, filepath):
     print("Saving model and optimizer state at iteration {} to {}".format(
         iteration, filepath))
     torch.save({'iteration': iteration,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
+                'step_scheduler': step_scheduler.state_dict(),
+                'warmup_scheduler': warmup_scheduler.state_dict(),
                 'learning_rate': learning_rate}, filepath)
 
 
@@ -129,7 +135,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         val_sampler = DistributedSampler(valset) if distributed_run else None
         val_loader = DataLoader(valset, sampler=val_sampler, num_workers=1,
                                 shuffle=False, batch_size=batch_size,
-                                pin_memory=False, collate_fn=collate_fn)
+                                pin_memory=True, collate_fn=collate_fn)
 
         val_loss = 0.0
         for i, batch in enumerate(val_loader):
@@ -149,7 +155,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         logger.log_validation(val_loss, model, y, y_pred, iteration)
 
 
-def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
+def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
           rank, group_name, hparams):
     """Training and validation logging results to tensorboard and stdout
 
@@ -172,13 +178,9 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
+    scaler = amp.GradScaler()
     step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50000, gamma=0.5)
-    warmup_scheduler = GradualWarmupScheduler(optimizer, 1, 4000, after_scheduler=step_scheduler)
-
-    if hparams.fp16_run:
-        from apex import amp
-        model, optimizer = amp.initialize(
-            model, optimizer, opt_level='O2')
+    warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
@@ -198,7 +200,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             model = warm_start_model(
                 checkpoint_path, model, hparams.ignore_layers)
         else:
-            model, optimizer, warmup_scheduler, _learning_rate, iteration = load_checkpoint(
+            model, optimizer, scaler, step_scheduler, warmup_scheduler, _learning_rate, iteration = load_checkpoint(
                 checkpoint_path, model, optimizer)
             if hparams.use_saved_learning_rate:
                 learning_rate = _learning_rate
@@ -211,43 +213,35 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
-        for i, batch in enumerate(train_loader):
+        for i, batch in enumerate(tqdm(train_loader)):
             start = time.perf_counter()
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = learning_rate
 
             optimizer.zero_grad()
-            warmup_scheduler.step(iteration)
-            x, y = model.parse_batch(batch)
-            y_pred = model(x)
 
-            loss = criterion(y_pred, y)
+
+            with amp.autocast():
+                x, y = model.parse_batch(batch)
+                if args.profiling:
+                    with torch.autograd.profiler.profile(use_cuda=True) as prof:
+                        y_pred = model(x)
+                    print(prof.key_averages().table(sort_by="self_cuda_time_total"))
+                else:
+                    y_pred = model(x)
+                loss = criterion(y_pred, y)
+
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_loss = loss.item()
-            if hparams.fp16_run:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
 
-            if hparams.fp16_run:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    amp.master_params(optimizer), hparams.grad_clip_thresh)
-                is_overflow = math.isnan(grad_norm)
-            else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), hparams.grad_clip_thresh)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
 
-            optimizer.step()
-
-            if not is_overflow and rank == 0:
-                duration = time.perf_counter() - start
-                print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
-                    iteration, reduced_loss, grad_norm, duration))
-                logger.log_training(
-                    reduced_loss, grad_norm, learning_rate, duration, iteration)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hparams.grad_clip_thresh)
+            scaler.step(optimizer)
+            scaler.update()
+            step_scheduler.step()
+            warmup_scheduler.dampen()
 
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(model, criterion, valset, iteration,
@@ -256,10 +250,18 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                 if rank == 0:
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
-                    save_checkpoint(model, optimizer, warmup_scheduler, learning_rate, iteration,
+                    save_checkpoint(model, optimizer, scaler, step_scheduler, warmup_scheduler, learning_rate, iteration,
                                     checkpoint_path)
 
             iteration += 1
+
+        if not is_overflow and rank == 0:
+            learning_rate = optimizer.param_groups[0]['lr']
+            duration = time.perf_counter() - start
+            print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
+                iteration - 1, reduced_loss, grad_norm, duration))
+            logger.log_training(
+                reduced_loss, grad_norm, learning_rate, duration, iteration - 1)
 
 
 if __name__ == '__main__':
@@ -280,6 +282,8 @@ if __name__ == '__main__':
                         required=False, help='Distributed group name')
     parser.add_argument('--hparams', type=str,
                         required=False, help='comma separated name=value pairs')
+    parser.add_argument('--profiling', action='store_true',
+                        required=False, help='enables the profiler')
 
     args = parser.parse_args()
     hparams = create_hparams(args.hparams)
@@ -293,5 +297,5 @@ if __name__ == '__main__':
     print("cuDNN Enabled:", hparams.cudnn_enabled)
     print("cuDNN Benchmark:", hparams.cudnn_benchmark)
 
-    train(args.output_directory, args.log_directory, args.checkpoint_path,
+    train(args, args.output_directory, args.log_directory, args.checkpoint_path,
           args.warm_start, args.n_gpus, args.rank, args.group_name, hparams)
