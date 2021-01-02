@@ -39,20 +39,21 @@ class Duration(nn.Module):
 
         self.score_mask_value = -float("inf")
 
-    def positional_embedding(self, c, dim, T):
-        positional_embedding = torch.zeros(c.size(0), T, dim, device=c.device)
+    def positional_embedding(self, c, dim, t):
+        positional_embedding = torch.zeros(c.size(0), dim, device=c.device)
         i = torch.arange(0, dim, 2, device=c.device).float()
-        pos = torch.arange(0, T, device=c.device).unsqueeze(1).expand(-1, dim // 2)
+        #pos = torch.arange(0, T, device=c.device).unsqueeze(1).expand(-1, dim // 2)
+        pos = t
 
 
         divisor = torch.exp(i * -(log(self.timestep_denominator) / float(dim)))
 
-        positional_embedding[:, :, 0::2] = torch.sin(pos.float() * divisor)
-        positional_embedding[:, :, 1::2] = torch.cos(pos.float() * divisor)
+        positional_embedding[:, 0::2] = torch.sin(float(pos) * divisor)
+        positional_embedding[:, 1::2] = torch.cos(float(pos) * divisor)
 
         return positional_embedding
 
-    def gaussian_upsampling(self, H, d, c, std_dev, T):
+    def gaussian_upsampling(self, H, d, c, std_dev, t):
         # H = (seq_len, emb_size)
         # d = (seq_len)
         # std_dev = (seq_len) == sigma == σ
@@ -61,13 +62,11 @@ class Duration(nn.Module):
         # T = c_N, N = seq_len
         #N = H.size(1)
         # U = (time_steps, emb_size)
-        t = torch.arange(1, T+1, device=c.device).unsqueeze(0).transpose(0, 1)
-        t = t.unsqueeze(0).expand(d.size(0), -1, -1)
+        #t = torch.arange(1, t+1, device=c.device).unsqueeze(0).transpose(0, 1)
+        #t = t.unsqueeze(0).expand(d.size(0), -1, -1)
 
 
         c = c - (d / 2)
-        c = c.unsqueeze(1)
-        std_dev = std_dev.unsqueeze(1)
         #t_c = torch.sub(t, c) ** 2.
         #pow_std_dev = (-1 / (std_dev ** 2.)).unsqueeze(1).expand_as(t_c)
         #print(pow_std_dev)
@@ -75,23 +74,14 @@ class Duration(nn.Module):
         power = (torch.abs(t-c)**2. / -1 * (std_dev**2.))
 
         if self.mask is not None:
-            power.data.masked_fill_(self.mask.unsqueeze(1).expand_as(power), self.score_mask_value)
-        w = F.softmax(power, -1) 
+            power.data.masked_fill_(self.mask, self.score_mask_value)
+        w = F.softmax(power, -1).unsqueeze(1)
         U = torch.matmul(w, H)
 
         return U, w
 
-    def forward(self, h, d_sec, max_T, input_lengths):
-        self.mask=~get_mask_from_lengths(input_lengths)
-
-        # Convert frame size in seconds to integer frames
-        d = torch.round(d_sec * self.frame_size).long()
-        c = torch.cumsum(d, -1)
-        # U = (batch_size, time_steps, emb_size)
-        # Add 1 to last dimension of U for positional embedding
-        #gaussian_upsampling = torch.empty(h.size(0), max_T, self.encoder_embedding_dim, device=d.device)
-        #positional_embedding = torch.empty(h.size(0), max_T,  self.positional_embedding_dim, device=d.device)
-        #weights = torch.empty(h.size(0), max_T, h.size(1), device=d.device)
+    def forward(self, h, d, mask, input_lengths):
+        self.mask=mask
 
         range_in = torch.cat((h, d.unsqueeze(-1)), -1)
         input_lengths = input_lengths.cpu().numpy()
@@ -118,14 +108,7 @@ class Duration(nn.Module):
         range_output = F.softplus(range_proj)
         range_output = range_output.squeeze()
 
-        gaussian_upsampling, weights = self.gaussian_upsampling(h, d, c, range_output, max_T)
-        positional_embedding = self.positional_embedding(c, self.positional_embedding_dim, max_T)
-        
-        assert gaussian_upsampling.size(1) == positional_embedding.size(1), "Gaussian output and positional output should be same size"
-
-        U = torch.cat((gaussian_upsampling, positional_embedding), -1)
-
-        return U, pred_duration_output, weights
+        return range_output, pred_duration_output
 
     def inference(self, h):
         self.duration_lstm.flatten_parameters()
@@ -296,6 +279,8 @@ class Decoder(nn.Module):
         self.max_decoder_steps = hparams.max_decoder_steps
         self.p_decoder_dropout = hparams.p_decoder_dropout
 
+        self.duration_aligner = Duration(hparams)
+
         self.prenet = Prenet(
             hparams.n_mel_channels * hparams.n_frames_per_step,
             [hparams.prenet_dim, hparams.prenet_dim])
@@ -344,7 +329,7 @@ class Decoder(nn.Module):
         decoder_inputs = decoder_inputs.transpose(0, 1)
         return decoder_inputs
 
-    def decode(self, decoder_input, duration_input):
+    def decode(self, decoder_input, text_lengths, t, range_outputs, d, c):
         """ Decoder step using stored states, attention and memory
         PARAMS
         ------
@@ -357,8 +342,14 @@ class Decoder(nn.Module):
         gate_output: gate output energies
         attention_weights:
         """
-        cell_input = torch.cat((decoder_input, duration_input), -1)
 
+        
+        self.gaussian_upsampling, self.weights = self.duration_aligner.gaussian_upsampling(self.encoder_outputs, d, c, range_outputs, t)
+        self.positional_embedding = self.duration_aligner.positional_embedding(c, self.duration_aligner.positional_embedding_dim, t)
+        
+        self.duration_output = torch.cat((self.gaussian_upsampling.squeeze(), self.positional_embedding), -1)
+
+        cell_input = torch.cat((decoder_input, self.duration_output), -1)
 
         self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
             cell_input, (self.decoder_hidden1, self.decoder_cell1))
@@ -374,12 +365,12 @@ class Decoder(nn.Module):
                 self.decoder_hidden2[0], self.decoder_hidden2, p=0.1)
 
         hidden_duration_context = torch.cat(
-            (self.decoder_hidden2, duration_input), dim=1)
+            (self.decoder_hidden2, self.duration_output), dim=1)
         decoder_output = self.linear_projection(hidden_duration_context)
 
-        return decoder_output
+        return decoder_output, self.weights
 
-    def forward(self, duration_outputs, decoder_inputs, memory_lengths):
+    def forward(self, encoder_outputs, durations, decoder_inputs, memory_lengths):
         """ Decoder forward pass for training
         PARAMS
         ------
@@ -396,14 +387,20 @@ class Decoder(nn.Module):
         """
 
         B = decoder_inputs.size(0)
-
-
-        decoder_input = self.get_go_frame(duration_outputs.size(0), decoder_inputs.device).unsqueeze(0)
+        MAX_T = decoder_inputs.size(1)
+        seq_len = durations.size(1)
+        
+        decoder_input = self.get_go_frame(B, decoder_inputs.device).unsqueeze(0)
         decoder_inputs = self.parse_decoder_inputs(decoder_inputs)
         decoder_inputs = torch.cat((decoder_input, decoder_inputs), dim=0)
         decoder_inputs = self.prenet(decoder_inputs)
 
         mask=~get_mask_from_lengths(memory_lengths)
+
+        self.gaussian_upsampling = torch.empty(B, self.duration_aligner.encoder_embedding_dim, device=decoder_inputs.device)
+        self.positional_embedding = torch.empty(B, self.duration_aligner.positional_embedding_dim, device=decoder_inputs.device)
+        self.weights = torch.empty(B, 1, seq_len, device=decoder_inputs.device)
+        self.duration_output = torch.empty(B, self.encoder_embedding_dim + self.duration_aligner.positional_embedding_dim, device=decoder_inputs.device)
 
         self.decoder_hidden1 = torch.zeros(B, self.decoder_rnn_dim, device=decoder_inputs.device)
         self.decoder_cell1 = torch.zeros(B, self.decoder_rnn_dim, device=decoder_inputs.device)
@@ -411,18 +408,26 @@ class Decoder(nn.Module):
         self.decoder_cell2 = torch.zeros(B, self.decoder_rnn_dim, device=decoder_inputs.device)
 
         self.mask = mask
+        self.input_lengths = memory_lengths
+        self.encoder_outputs = encoder_outputs
+        self.durations = durations
 
-        duration_outputs = duration_outputs.transpose(0, 1)
+        # Convert frame size in seconds to integer frames
+        d = torch.round(durations * self.duration_aligner.frame_size).long()
+        c = torch.cumsum(d, -1)
 
-        mel_outputs = []
+
+        range_outputs, predicted_durations = self.duration_aligner(encoder_outputs, d, self.mask, self.input_lengths)
+
+        mel_outputs, alignments = [], []
         while len(mel_outputs) < decoder_inputs.size(0) - 1:
             mel_outputs_len = len(mel_outputs)
             decoder_input = decoder_inputs[mel_outputs_len]
 
-            duration_input = duration_outputs[mel_outputs_len]
-            mel_output = self.decode(
-                decoder_input, duration_input)
+            mel_output, alignment = self.decode(
+                decoder_input, memory_lengths, mel_outputs_len, range_outputs, d, c)
             mel_outputs += [mel_output.squeeze(1)]
+            alignments += [alignment.squeeze(1)]
 
         # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
         mel_outputs = torch.stack(mel_outputs)
@@ -434,7 +439,9 @@ class Decoder(nn.Module):
         # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
         mel_outputs = mel_outputs.transpose(1, 2)
 
-        return mel_outputs
+        alignments = torch.stack(alignments)
+
+        return mel_outputs, predicted_durations, alignments
 
     def inference(self, duration_outputs):
         """ Decoder forward pass for training
@@ -496,7 +503,6 @@ class Tacotron2(nn.Module):
         val = sqrt(3.0) * std  # uniform bounds for std
         self.embedding.weight.data.uniform_(-val, val)
         self.encoder = Encoder(hparams)
-        self.duration_aligner = Duration(hparams)
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
 
@@ -533,12 +539,7 @@ class Tacotron2(nn.Module):
 
         encoder_outputs = self.encoder(embedded_inputs, text_lengths)
 
-        MAX_T = mels.size(-1)
-        
-        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T, text_lengths)
-
-        mel_outputs = self.decoder(duration_outputs, mels, memory_lengths=text_lengths)
-
+        mel_outputs, predicted_durations, alignments = self.decoder(encoder_outputs, durations, mels, memory_lengths=text_lengths)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
