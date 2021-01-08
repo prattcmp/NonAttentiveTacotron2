@@ -48,7 +48,8 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Model Parameters             #
         ################################
-        n_symbols=len(symbols),
+        # n_symbols + 1 for stop token
+        n_symbols=(len(symbols)+2),
         symbols_embedding_dim=512,
 
         # Encoder parameters
@@ -92,9 +93,9 @@ def create_hparams(hparams_string=None, verbose=False):
         use_saved_learning_rate=False,
         learning_rate=1e-3,
         weight_decay=1e-6,
-        grad_clip_thresh=0.1,
+        grad_clip_thresh=0.5,
         batch_size=32,
-        mask_padding=False  # set model's padded outputs to padded values
+        mask_padding=True  # set model's padded outputs to padded values
     )
 
     return hparams

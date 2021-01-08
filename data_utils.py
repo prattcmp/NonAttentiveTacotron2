@@ -68,7 +68,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         2) normalizes text and converts them to sequences of one-hot vectors
         3) computes mel-spectrograms from audio files.
     """
-    def __init__(self, audiopaths_and_text, hparams, use_textgrid=False, valset=False):
+    def __init__(self, audiopaths_and_text, hparams, use_textgrid=False, dataset_type='train'):
         self.g2p = G2p()
         self.use_textgrid = use_textgrid
         if use_textgrid:
@@ -76,13 +76,16 @@ class TextMelLoader(torch.utils.data.Dataset):
             self.textgrid_paths = glob.glob("LJSpeech/durations/*.TextGrid")
         else:
             self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
-        random.seed(hparams.seed)
-        random.shuffle(self.textgrid_paths if use_textgrid else self.audiopaths_and_text)
 
-        if valset == True:
+        if dataset_type == 'val' or dataset_type == 'train':
+            random.seed(hparams.seed)
+            random.shuffle(self.textgrid_paths if use_textgrid else self.audiopaths_and_text)
+
+        if dataset_type == 'val':
             self.textgrid_paths = self.textgrid_paths[:101]
-        else:
+        elif dataset_type == 'train':
             self.textgrid_paths = self.textgrid_paths[101:]
+
 
         self.text_cleaners = hparams.text_cleaners
         self.max_wav_value = hparams.max_wav_value
@@ -108,16 +111,19 @@ class TextMelLoader(torch.utils.data.Dataset):
         phoneme_intervals_dict = {str(phoneme_intervals[i].maxTime): i for i in range(len(phoneme_intervals))}
 
         # Returns: Python Dictionary(key: phoneme_idx, value: punctuation_char)
-        punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
+        #punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
 
         phonemes = []
         durations = []
         for i in range(len(phoneme_intervals)):
             interval = phoneme_intervals[i]
             phoneme = interval.mark 
+
+            '''
             # Append the punctuation directly to the phoneme
             if i in punctuations:
                 phoneme += punctuations[i]
+            '''
 
             duration = interval.maxTime - interval.minTime
 
@@ -129,9 +135,13 @@ class TextMelLoader(torch.utils.data.Dataset):
         text = self.get_text(phonemes)
         duration = self.get_duration(durations)
 
+        # Assume the stop/end token is missing
+        if (len(text) - 1) == len(duration):
+            duration = torch.cat((duration, torch.zeros(1, dtype=torch.float)), 0)
+            
         assert len(text) == len(duration), "duration length and phoneme token length are unequal. this breaks the entire model"
 
-        return (text, mel, duration)
+        return (text, mel, duration, audio_name)
                 
 
     def get_mel_text_pair(self, audiopath_and_text):
@@ -143,7 +153,8 @@ class TextMelLoader(torch.utils.data.Dataset):
         return (text, mel)
 
     def get_mel(self, filename):
-        if not self.load_mel_from_disk:
+        npy_path = Path(filename).with_suffix('.npy')
+        if not npy_path.is_file():
             audio, sampling_rate = load_wav_to_torch(filename)
             if sampling_rate != self.stft.sampling_rate:
                 raise ValueError("{} {} SR doesn't match target {} SR".format(
@@ -153,8 +164,10 @@ class TextMelLoader(torch.utils.data.Dataset):
             audio_norm = torch.autograd.Variable(audio_norm, requires_grad=False)
             melspec = self.stft.mel_spectrogram(audio_norm)
             melspec = torch.squeeze(melspec, 0)
+
+            np.save(npy_path, melspec.cpu().detach().numpy())
         else:
-            melspec = torch.from_numpy(np.load(filename))
+            melspec = torch.from_numpy(np.load(npy_path))
             assert melspec.size(0) == self.stft.n_mel_channels, (
                 'Mel dimension mismatch: given {}, expected {}'.format(
                     melspec.size(0), self.stft.n_mel_channels))
@@ -221,10 +234,13 @@ class TextMelCollate():
         mel_padded = torch.FloatTensor(len(batch), num_mels, max_target_len)
         mel_padded.zero_()
         output_lengths = torch.LongTensor(len(batch))
+        audio_names = torch.LongTensor(len(batch), 10)
         for i in range(len(ids_sorted_decreasing)):
             mel = batch[ids_sorted_decreasing[i]][1]
             mel_padded[i, :, :mel.size(1)] = mel
             output_lengths[i] = mel.size(1)
 
+            audio_names[i] = torch.LongTensor([ord(ch) for ch in batch[ids_sorted_decreasing[i]][3]])
+
         return text_padded, input_lengths, mel_padded, duration_padded, \
-            output_lengths
+            output_lengths, audio_names

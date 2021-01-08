@@ -30,7 +30,14 @@ def text_to_sequence(text, g2p, use_textgrid=False):
     text = re.sub(re.compile(r'\s+'), ' ', text)
     text = g2p(text)
 
-  return  _arpabet_to_sequence(text)
+  arpabet = _arpabet_to_sequence(text)
+
+  end_token = len(symbols) + 1
+
+  if arpabet[-1] != end_token:
+    arpabet.append(end_token)
+  
+  return arpabet
 
 
 def sequence_to_text(sequence):

@@ -2,6 +2,7 @@ import os
 import time
 import argparse
 import math
+import numpy as np
 from numpy import finfo
 
 import torch
@@ -47,7 +48,7 @@ def init_distributed(hparams, n_gpus, rank, group_name):
 def prepare_dataloaders(hparams):
     # Get data, data loaders and collate function ready
     trainset = TextMelLoader(hparams.training_files, hparams, use_textgrid=True)
-    valset = TextMelLoader(hparams.validation_files, hparams, use_textgrid=True, valset=True)
+    valset = TextMelLoader(hparams.validation_files, hparams, use_textgrid=True, dataset_type='val')
     collate_fn = TextMelCollate(hparams.n_frames_per_step)
 
     if hparams.distributed_run:
@@ -127,6 +128,30 @@ def save_checkpoint(model, optimizer, scaler, step_scheduler, warmup_scheduler, 
                 'learning_rate': learning_rate}, filepath)
 
 
+def teacher_forcing(model, dataset, batch_size, n_gpus, collate_fn, distributed_run):
+    """Handles all the validation scoring and printing"""
+    model.eval()
+    with torch.no_grad():
+        data_sampler = DistributedSampler(dataset) if distributed_run else None
+        data_loader = DataLoader(dataset, sampler=data_sampler, num_workers=4,
+                                shuffle=False, batch_size=32,
+                                pin_memory=False, collate_fn=collate_fn)
+
+        for i, batch in enumerate(tqdm(data_loader), 1):
+            x, y, audio_names = model.parse_batch(batch, teacher_forcing=True)
+            output_lengths = x[-1]
+            _, mel_out_postnet, _, _ = model(x)
+
+            for j in range(len(x[2])):
+                audio_name = ''.join([chr(idx) for idx in audio_names[j].tolist()])
+                output_length = output_lengths[j].item()
+                melspec = mel_out_postnet[j, :, :output_length]
+
+
+                # TODO: This path is hardcoded and should not be
+                np.save("LJSpeech/npy/"+audio_name+".npy", melspec.cpu().detach().numpy())
+
+
 def validate(model, criterion, valset, iteration, batch_size, n_gpus,
              collate_fn, logger, distributed_run, rank):
     """Handles all the validation scoring and printing"""
@@ -168,8 +193,6 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     rank (int): rank of current gpu
     hparams (object): comma separated list of "name=value" pairs.
     """
-    torch.autograd.set_detect_anomaly(True)
-
     if hparams.distributed_run:
         init_distributed(hparams, n_gpus, rank, group_name)
 
@@ -180,8 +203,8 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
-    scaler = amp.GradScaler(enabled=False)
-    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50000, gamma=0.5)
+    scaler = amp.GradScaler()
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=40000, gamma=0.5)
     warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
     if hparams.distributed_run:
@@ -209,6 +232,12 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             iteration += 1  # next iteration is iteration + 1
             epoch_offset = max(0, int(iteration / len(train_loader)))
 
+    if args.teacher_forcing:
+        tf_dataset = TextMelLoader(hparams.validation_files, hparams, use_textgrid=True, dataset_type='all')
+        teacher_forcing(model, tf_dataset, hparams.batch_size, n_gpus, collate_fn, hparams.distributed_run)
+
+        return
+
     model.train()
     is_overflow = False
 
@@ -220,8 +249,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
 
             optimizer.zero_grad()
 
-
-            with amp.autocast(enabled=False):
+            with amp.autocast():
                 x, y = model.parse_batch(batch)
                 if args.profiling:
                     with torch.autograd.profiler.profile(use_cuda=True) as prof:
@@ -242,7 +270,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hparams.grad_clip_thresh)
             scaler.step(optimizer)
             scaler.update()
-            step_scheduler.step(step_scheduler.last_epoch + 1)
+            step_scheduler.step(step_scheduler.last_epoch+1)
             warmup_scheduler.dampen()
 
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
@@ -276,6 +304,8 @@ if __name__ == '__main__':
                         required=False, help='checkpoint path')
     parser.add_argument('--warm_start', action='store_true',
                         help='load model weights only, ignore specified layers')
+    parser.add_argument('--teacher_forcing', action='store_true',
+                        help='generate numpy files from teacher forcing')
     parser.add_argument('--n_gpus', type=int, default=1,
                         required=False, help='number of gpus')
     parser.add_argument('--rank', type=int, default=0,
