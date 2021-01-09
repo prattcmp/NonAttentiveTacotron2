@@ -204,7 +204,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
     scaler = amp.GradScaler()
-    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=40000, gamma=0.5)
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30000, gamma=0.5)
     warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
     if hparams.distributed_run:

@@ -4,4 +4,4 @@
 	branch = master
 [submodule "hifi-gan"]
 	path = hifigan
-	url = git@github.com:jik876/hifi-gan.git
+	url = git@github.com:prattcmp/hifigan.git

@@ -19,7 +19,7 @@ class Duration(nn.Module):
         self.positional_embedding_dim = hparams.positional_embedding_dim
         self.timestep_denominator = hparams.timestep_denominator
         # Frame size in ms
-        self.frame_size = hparams.sampling_rate * hparams.hop_length
+        self.frame_size = hparams.sampling_rate / hparams.hop_length
         
         # Duration predictor
         self.duration_lstm = nn.LSTM(hparams.encoder_embedding_dim,
