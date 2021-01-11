@@ -23,18 +23,18 @@ class Duration(nn.Module):
         
         # Duration predictor
         self.duration_lstm = nn.LSTM(hparams.encoder_embedding_dim,
-                            hparams.duration_rnn_dim, 2,
+                            int(hparams.duration_rnn_dim / 2), 2,
                             batch_first=True, bidirectional=True)
 
         # Range parameter predictor
         # Add 1 because we concatenate durations
         self.range_lstm = nn.LSTM(hparams.encoder_embedding_dim + 1,
-                            hparams.range_rnn_dim, 2,
+                            int(hparams.range_rnn_dim / 2), 2,
                             batch_first=True, bidirectional=True)
 
-        self.duration_projection = LinearNorm(2* hparams.duration_rnn_dim, 1, bias=False)
+        self.duration_projection = LinearNorm(hparams.duration_rnn_dim, 1, bias=False)
 
-        self.range_projection = LinearNorm(2*hparams.range_rnn_dim, 1, bias=False)
+        self.range_projection = LinearNorm(hparams.range_rnn_dim, 1, bias=False)
 
         self.score_mask_value = -float("inf")
 

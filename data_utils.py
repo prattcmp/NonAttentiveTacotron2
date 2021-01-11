@@ -111,19 +111,37 @@ class TextMelLoader(torch.utils.data.Dataset):
         phoneme_intervals_dict = {str(phoneme_intervals[i].maxTime): i for i in range(len(phoneme_intervals))}
 
         # Returns: Python Dictionary(key: phoneme_idx, value: punctuation_char)
-        #punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
-
+        punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
+        word_boundaries_dict = {w.maxTime: 1 for w in word_intervals}
         phonemes = []
         durations = []
+        captured_space = False
         for i in range(len(phoneme_intervals)):
             interval = phoneme_intervals[i]
             phoneme = interval.mark 
 
-            '''
-            # Append the punctuation directly to the phoneme
+            next_interval, next_phoneme, next_duration = None, None, None
+            if i < len(phoneme_intervals) - 1:
+                next_interval = phoneme_intervals[i+1]
+                next_phoneme = next_interval.mark
+
+            if captured_space and phoneme == "sp":
+                continue
+            if phoneme == "sp":
+                print("Prior:", phoneme_intervals[i+1].mark)
+
+            captured_space = False
+
+            # Try to replace the sp token with punctuation; otherwise, give it a token with dur 0
+            next_duration = None
             if i in punctuations:
-                phoneme += punctuations[i]
-            '''
+                if next_phoneme == "sp":
+                    captured_space = True
+                    next_duration = next_interval.maxTime - next_interval.minTime
+                else:
+                    next_duration = 0.0
+
+                next_phoneme = punctuations[i]
 
             duration = interval.maxTime - interval.minTime
 
@@ -131,6 +149,19 @@ class TextMelLoader(torch.utils.data.Dataset):
             # INPUT PHONEMES HAVE PUNCTUATION ENCODINGS!!!
             phonemes.append(phoneme)
             durations.append(duration)
+            if next_duration is not None:
+                phonemes.append(next_phoneme)
+                durations.append(next_duration)
+
+            # Add word boundary token AFTER we've modified our other tokens
+            if interval.maxTime in word_boundaries_dict:
+                word_boundary_token = "<bd>"
+                phonemes.append(word_boundary_token)
+                if not captured_space and next_phoneme == "sp":
+                    captured_space = True
+                    durations.append(next_interval.maxTime - next_interval.minTime)
+                else:
+                    durations.append(0.0)
 
         text = self.get_text(phonemes)
         duration = self.get_duration(durations)
