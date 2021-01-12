@@ -57,6 +57,17 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
 
+        # GST parameters
+        gst_embedding_dim=64,
+        gst_heads=4,
+        gst_output_channels=[32, 32, 64, 64, 128, 128],
+        gst_kernel_size=[3,3],
+        gst_stride=[2,2],
+        gst_padding=[1,1],
+
+        # TPSE parameters
+        tpse_rnn_size=128,
+
         # Duration parameters
         duration_rnn_dim=512,
         range_rnn_dim=512,

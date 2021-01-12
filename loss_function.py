@@ -12,7 +12,7 @@ class Tacotron2Loss(nn.Module):
         mel_target.requires_grad = False
         duration_target.requires_grad = False
 
-        mel_out, mel_out_postnet, duration_out, alignment = model_output
+        mel_out, mel_out_postnet, duration_out, alignment, gst_out, gst_target = model_output
 
         mel_loss = nn.MSELoss()(mel_out, mel_target) + \
             nn.MSELoss()(mel_out_postnet, mel_target) + \
@@ -21,4 +21,6 @@ class Tacotron2Loss(nn.Module):
 
         dur_loss = nn.MSELoss()(duration_out, duration_target)
 
-        return mel_loss + self.lambda_duration * dur_loss
+        tpse_loss = nn.MSELoss()(gst_out, gst_target)
+
+        return mel_loss + tpse_loss + self.lambda_duration * dur_loss
