@@ -5,3 +5,9 @@
 [submodule "hifi-gan"]
 	path = hifigan
 	url = git@github.com:prattcmp/hifigan.git
+[submodule "g2p"]
+	path = g2p
+	url = git@github.com:prattcmp/g2p.git
+[submodule "speakerembedding"]
+	path = speakerembedding
+	url = git@github.com:prattcmp/speakerembedding.git

@@ -9,7 +9,7 @@ class TPSE(nn.Module):
     def __init__(self, hparams):
         super().__init__()
         
-        self.rnn = nn.GRU(hparams.encoder_embedding_dim, hparams.tpse_rnn_size, batch_first=True)
+        self.rnn = nn.GRU(hparams.encoder_output_dim, hparams.tpse_rnn_size, batch_first=True)
         self.fc1 = nn.Linear(hparams.tpse_rnn_size, hparams.gst_embedding_dim)
         
     def forward(self, x):

@@ -12,7 +12,7 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Experiment Parameters        #
         ################################
-        epochs=500,
+        epochs=1500,
         iters_per_checkpoint=1000,
         seed=1234,
         dynamic_loss_scaling=True,
@@ -56,9 +56,10 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_kernel_size=5,
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
+        encoder_output_dim=1024,
 
         # GST parameters
-        gst_embedding_dim=64,
+        gst_embedding_dim=128,
         gst_heads=4,
         gst_output_channels=[32, 32, 64, 64, 128, 128],
         gst_kernel_size=[3,3],
@@ -66,11 +67,11 @@ def create_hparams(hparams_string=None, verbose=False):
         gst_padding=[1,1],
 
         # TPSE parameters
-        tpse_rnn_size=128,
+        tpse_rnn_size=256,
 
         # Duration parameters
-        duration_rnn_dim=512,
-        range_rnn_dim=512,
+        duration_rnn_dim=1024,
+        range_rnn_dim=1024,
         duration_lambda=2.0,
         positional_embedding_dim=32,
         timestep_denominator=10000.0,
@@ -104,8 +105,8 @@ def create_hparams(hparams_string=None, verbose=False):
         use_saved_learning_rate=False,
         learning_rate=1e-3,
         weight_decay=1e-6,
-        grad_clip_thresh=50.0,
-        batch_size=32,
+        grad_clip_thresh=10.0,
+        batch_size=128,
         mask_padding=True  # set model's padded outputs to padded values
     )
 

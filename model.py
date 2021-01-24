@@ -17,20 +17,20 @@ def zoneout(prev, current, p=0.1):
 class Duration(nn.Module):
     def __init__(self, hparams):
         super(Duration, self).__init__()
-        self.encoder_embedding_dim = hparams.encoder_embedding_dim + hparams.gst_embedding_dim
+        self.encoder_output_dim = hparams.encoder_output_dim #+ hparams.gst_embedding_dim
         self.positional_embedding_dim = hparams.positional_embedding_dim
         self.timestep_denominator = hparams.timestep_denominator
         # Frame size in ms
         self.frame_size = hparams.sampling_rate / hparams.hop_length
         
         # Duration predictor
-        self.duration_lstm = nn.LSTM(self.encoder_embedding_dim,
+        self.duration_lstm = nn.LSTM(self.encoder_output_dim,
                             int(hparams.duration_rnn_dim / 2), 2,
                             batch_first=True, bidirectional=True)
 
         # Range parameter predictor
         # Add 1 because we concatenate durations
-        self.range_lstm = nn.LSTM(self.encoder_embedding_dim + 1,
+        self.range_lstm = nn.LSTM(self.encoder_output_dim + 1,
                             int(hparams.range_rnn_dim / 2), 2,
                             batch_first=True, bidirectional=True)
 
@@ -239,7 +239,7 @@ class Encoder(nn.Module):
         self.convolutions = nn.ModuleList(convolutions)
 
         self.lstm = nn.LSTM(hparams.encoder_embedding_dim,
-                            int(hparams.encoder_embedding_dim / 2), 1,
+                            int(hparams.encoder_output_dim / 2), 1,
                             batch_first=True, bidirectional=True)
 
     def forward(self, x, input_lengths):
@@ -258,8 +258,8 @@ class Encoder(nn.Module):
 
         outputs, _ = nn.utils.rnn.pad_packed_sequence(
             outputs, batch_first=True)
-        if self.training:
-            outputs = F.dropout(outputs, 0.1, self.training)
+        outputs = F.dropout(outputs, 0.1, self.training)
+        #if self.training:
             #outputs = zoneout(outputs[0], outputs, p=0.1)
 
         return outputs
@@ -281,7 +281,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.n_mel_channels = hparams.n_mel_channels
         self.n_frames_per_step = hparams.n_frames_per_step
-        self.encoder_embedding_dim = hparams.encoder_embedding_dim + hparams.gst_embedding_dim
+        self.encoder_output_dim = hparams.encoder_output_dim #+ hparams.gst_embedding_dim
         self.decoder_rnn_dim = hparams.decoder_rnn_dim
         self.prenet_dim = hparams.prenet_dim
         self.max_decoder_steps = hparams.max_decoder_steps
@@ -292,7 +292,7 @@ class Decoder(nn.Module):
             [hparams.prenet_dim, hparams.prenet_dim])
 
         self.decoder_rnn1 = LSTMCellNorm(
-            hparams.prenet_dim + self.encoder_embedding_dim + hparams.positional_embedding_dim,
+            hparams.prenet_dim + self.encoder_output_dim + hparams.positional_embedding_dim,
             hparams.decoder_rnn_dim, 1)
 
         self.decoder_rnn2 = LSTMCellNorm(
@@ -300,7 +300,7 @@ class Decoder(nn.Module):
             hparams.decoder_rnn_dim, 1)
 
         self.linear_projection = LinearNorm(
-            hparams.decoder_rnn_dim + self.encoder_embedding_dim + hparams.positional_embedding_dim,
+            hparams.decoder_rnn_dim + self.encoder_output_dim + hparams.positional_embedding_dim,
             hparams.n_mel_channels * hparams.n_frames_per_step)
 
     def get_go_frame(self, B, device):
@@ -354,15 +354,17 @@ class Decoder(nn.Module):
         self.decoder_hidden1, self.decoder_cell1 = self.decoder_rnn1(
             cell_input, (self.decoder_hidden1, self.decoder_cell1))
 
-        if self.training:
-            self.decoder_hidden1 = zoneout(
-                self.decoder_hidden1[0], self.decoder_hidden1, p=0.1)
+        self.decoder_hidden1 = F.dropout(self.decoder_hidden1, 0.1, self.training)
+        #if self.training:
+        #    self.decoder_hidden1 = zoneout(
+        #        self.decoder_hidden1[0], self.decoder_hidden1, p=0.1)
 
         self.decoder_hidden2, self.decoder_cell2 = self.decoder_rnn2(
             self.decoder_hidden1, (self.decoder_hidden2, self.decoder_cell2))
-        if self.training:
-            self.decoder_hidden2 = zoneout(
-                self.decoder_hidden2[0], self.decoder_hidden2, p=0.1)
+        self.decoder_hidden2 = F.dropout(self.decoder_hidden2, 0.1, self.training)
+        #if self.training:
+        #    self.decoder_hidden2 = zoneout(
+        #        self.decoder_hidden2[0], self.decoder_hidden2, p=0.1)
 
         hidden_duration_context = torch.cat(
             (self.decoder_hidden2, duration_input), dim=1)
@@ -488,9 +490,9 @@ class Tacotron2(nn.Module):
         std = sqrt(2.0 / (hparams.n_symbols + hparams.symbols_embedding_dim))
         val = sqrt(3.0) * std  # uniform bounds for std
         self.embedding.weight.data.uniform_(-val, val)
-        self.gst = GST(hparams)
+        #self.gst = GST(hparams)
         self.encoder = Encoder(hparams)
-        self.tpse = TPSE(hparams)
+        #self.tpse = TPSE(hparams)
         self.duration_aligner = Duration(hparams)
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
@@ -531,22 +533,22 @@ class Tacotron2(nn.Module):
 
         embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
 
-        gst_outputs = self.gst(mels)  # [N, 256]
+        #gst_outputs = self.gst(mels)  # [N, 256]
 
         encoder_outputs = self.encoder(embedded_inputs, text_lengths)
-        gst_outputs = gst_outputs.expand(gst_outputs.size(0), encoder_outputs.size(1), gst_outputs.size(2))
+        #gst_outputs = gst_outputs.expand(gst_outputs.size(0), encoder_outputs.size(1), gst_outputs.size(2))
         # Prevent back-propagation from tpse into encoder
-        encoder_detached = encoder_outputs.detach().clone()
+        #encoder_detached = encoder_outputs.detach().clone()
 
         # Concatenate GST to encoder outputs
-        encoder_outputs_cat = torch.cat((encoder_outputs, gst_outputs), -1)
+        #encoder_outputs_cat = torch.cat((encoder_outputs, gst_outputs), -1)
 
-        gst_predicted = self.tpse(encoder_detached)
-        gst_predicted = gst_predicted.expand_as(gst_outputs)
+        #gst_predicted = self.tpse(encoder_detached)
+        #gst_predicted = gst_predicted.expand_as(gst_outputs)
 
         MAX_T = mels.size(-1)
         
-        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs_cat, durations, MAX_T, text_lengths)
+        duration_outputs, predicted_durations, alignments = self.duration_aligner(encoder_outputs, durations, MAX_T, text_lengths)
 
         mel_outputs = self.decoder(duration_outputs, mels, memory_lengths=text_lengths)
 
@@ -555,7 +557,8 @@ class Tacotron2(nn.Module):
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
         return self.parse_output(
-            [mel_outputs, mel_outputs_postnet, predicted_durations, alignments, gst_predicted, gst_outputs],
+            [mel_outputs, mel_outputs_postnet, predicted_durations, alignments],
+            #[mel_outputs, mel_outputs_postnet, predicted_durations, alignments, gst_predicted, gst_outputs],
             output_lengths)
 
     def inference(self, inputs):
@@ -563,14 +566,15 @@ class Tacotron2(nn.Module):
 
         encoder_outputs = self.encoder.inference(embedded_inputs)
 
-        encoder_detached = encoder_outputs.detach().clone()
-        gst_predicted = self.tpse(encoder_detached)
-        gst_predicted = gst_predicted.expand(gst_predicted.size(0), encoder_outputs.size(1), gst_predicted.size(2))
+        #encoder_detached = encoder_outputs.detach().clone()
+        #gst_predicted = self.tpse(encoder_detached)
+        #gst_predicted = gst_predicted.expand(gst_predicted.size(0), encoder_outputs.size(1), gst_predicted.size(2))
 
         # Concatenate GST to encoder outputs
-        encoder_outputs_cat = torch.cat((encoder_outputs, gst_predicted), -1)
+        #encoder_outputs_cat = torch.cat((encoder_outputs, gst_predicted), -1)
 
-        duration_outputs, alignments = self.duration_aligner.inference(encoder_outputs_cat)
+        duration_outputs, alignments = self.duration_aligner.inference(encoder_outputs)
+        #duration_outputs, alignments = self.duration_aligner.inference(encoder_outputs_cat)
 
         mel_outputs = self.decoder.inference(duration_outputs)
 

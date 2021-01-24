@@ -137,7 +137,7 @@ def teacher_forcing(model, dataset, batch_size, n_gpus, collate_fn, distributed_
                                 shuffle=False, batch_size=32,
                                 pin_memory=False, collate_fn=collate_fn)
 
-        for i, batch in enumerate(tqdm(data_loader), 1):
+        for i, batch in enumerate(tqdm(data_loader, position=0, leave=True), 1):
             x, y, audio_names = model.parse_batch(batch, teacher_forcing=True)
             output_lengths = x[-1]
             _, mel_out_postnet, _, _ = model(x)
@@ -166,11 +166,20 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
             y_pred = model(x)
-            loss = criterion(y_pred, y)
+            loss, losses_pkg = criterion(y_pred, y)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
+                reduced_val_mel = reduce_tensor(losses_pkg[0].data, n_gpus).item()
+                reduced_val_dur = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                #reduced_val_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                #reduced_val_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
+                reduced_val_mel = losses_pkg[0].item()
+                reduced_val_dur = losses_pkg[1].item()
+                #reduced_val_tpse = losses_pkg[1].item()
+                #reduced_val_dur = losses_pkg[2].item()
+
             val_loss += reduced_val_loss
         val_loss = val_loss / (i + 1)
 
@@ -204,7 +213,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
     scaler = amp.GradScaler()
-    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30000, gamma=0.5)
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
     warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
     if hparams.distributed_run:
@@ -257,12 +266,23 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
                     print(prof.key_averages().table(sort_by="self_cuda_time_total"))
                 else:
                     y_pred = model(x)
-                loss = criterion(y_pred, y)
+                loss, losses_pkg = criterion(y_pred, y)
 
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
+                reduced_mel = reduce_tensor(losses_pkg[0].data, n_gpus).item()
+                reduced_dur = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                #reduced_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                #reduced_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
             else:
                 reduced_loss = loss.item()
+                reduced_mel = losses_pkg[0].item()
+                reduced_dur = losses_pkg[1].item()
+                #reduced_tpse = losses_pkg[1].item()
+                #reduced_dur = losses_pkg[2].item()
+
+            losses_pkg = reduced_mel, reduced_dur
+            #losses_pkg = reduced_mel, reduced_tpse, reduced_dur
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -291,7 +311,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
                 print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(
                     iteration - 1, reduced_loss, grad_norm, duration))
                 logger.log_training(
-                    reduced_loss, grad_norm, learning_rate, duration, iteration - 1)
+                    reduced_loss, grad_norm, learning_rate, duration, iteration - 1, losses_pkg)
 
 
 if __name__ == '__main__':
