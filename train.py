@@ -213,7 +213,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
     scaler = amp.GradScaler()
-    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=12500, gamma=0.5)
     warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
 
     if hparams.distributed_run:
@@ -249,6 +249,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
 
     model.train()
     is_overflow = False
+
 
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):

@@ -95,8 +95,10 @@ class Duration(nn.Module):
             input_lengths = input_lengths.cpu().numpy()
             range_in = nn.utils.rnn.pack_padded_sequence(
                 range_in, input_lengths, batch_first=True)
+
+            h_detached = h.detach().clone()
             h1 = nn.utils.rnn.pack_padded_sequence(
-                h, input_lengths, batch_first=True)
+                h_detached, input_lengths, batch_first=True)
 
             self.duration_lstm.flatten_parameters()
             duration_h, _ = self.duration_lstm(h1)

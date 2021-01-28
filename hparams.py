@@ -56,7 +56,7 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_kernel_size=5,
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
-        encoder_output_dim=1024,
+        encoder_output_dim=512,
 
         # GST parameters
         gst_embedding_dim=128,
@@ -70,8 +70,8 @@ def create_hparams(hparams_string=None, verbose=False):
         tpse_rnn_size=256,
 
         # Duration parameters
-        duration_rnn_dim=1024,
-        range_rnn_dim=1024,
+        duration_rnn_dim=512,
+        range_rnn_dim=512,
         duration_lambda=2.0,
         positional_embedding_dim=32,
         timestep_denominator=10000.0,

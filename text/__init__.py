@@ -113,7 +113,6 @@ def text_to_sequence(text, g2p, use_textgrid=False):
   if not use_textgrid:
     text = re.sub(re.compile(r'\s+'), ' ', text)
     text = format_input_text(text)
-    print(text)
     text = g2p(text)
 
   arpabet = _arpabet_to_sequence(text)
@@ -122,6 +121,7 @@ def text_to_sequence(text, g2p, use_textgrid=False):
 
   if arpabet[-1] != end_token:
     arpabet.append(end_token)
+
   
   return arpabet
 
