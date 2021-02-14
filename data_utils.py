@@ -12,11 +12,16 @@ from utils import load_wav_to_torch, load_filepaths_and_text
 from text import text_to_sequence
 from g2p_en import G2p
 from textgrid import TextGrid
+from speakerembedding.Pattern_Generator import Pattern_Generate_Inference
+from speakerembedding.Datasets import Correction
 
-def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
-    punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~'"
 
-    with open("LJSpeech/wavs/" + audio_name + ".lab") as f:
+def find_punctuation(filename, word_intervals_dict, phoneme_intervals_dict):
+    punctuations = "!\"#$%&()*+,-./:;<=>?@[\]^_{|}~'—"
+
+    lab_path = filename.with_suffix('.lab')
+
+    with lab_path.open() as f:
         text = f.readline().strip()
         punc_positions = {pos: char for pos, char in enumerate(text) if char in punctuations}
 
@@ -53,10 +58,17 @@ def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
             new_text = text[begin:end+1]
             word = new_text.translate(str.maketrans('', '', punctuations)).lower()
 
-#            if word == "co":
+#            if word == "anger":
 #                print(new_text, word, text, word_intervals_dict)
+#                print(lab_path.stem)
 
-            word_maxTime = word_intervals_dict[word]
+            try:
+                word_maxTime = word_intervals_dict[word]
+            except:
+                print(new_text, word, text, word_intervals_dict)
+                print(lab_path.stem)
+                continue
+                
             phoneme_idx = phoneme_intervals_dict[word_maxTime]
             found_phonemes[phoneme_idx] = char
 
@@ -73,7 +85,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         self.use_textgrid = use_textgrid
         if use_textgrid:
             # TODO: HARDCODED PATH! SHOULD CHANGE THIS AT SOME POINT
-            self.textgrid_paths = glob.glob("LJSpeech/durations/*.TextGrid")
+            self.textgrid_paths = list(Path('LibriTTS/durations').rglob("*.TextGrid"))
         else:
             self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
 
@@ -99,8 +111,14 @@ class TextMelLoader(torch.utils.data.Dataset):
     def get_from_textgrid(self, path):
         # Get audiopaths, durations, and phonemes
         audio_name = Path(path).stem
+        folder = audio_name.split('_')[0]
+        wav_file = Path("LibriTTS/train-clean-360/" + folder + '/' + audio_name + ".wav")
         # TODO: HARDCODED PATH! SHOULD CHANGE THIS AT SOME POINT
-        mel = self.get_mel("LJSpeech/wavs/" + audio_name + ".wav")
+        mel = self.get_mel(wav_file)
+        # Text string for torchmoji embeddings
+        tokenized_text = self.get_tokenized_text(wav_file)
+        # Mel for speaker embedding code
+        mel2 = Pattern_Generate_Inference(wav_file, top_db= 20)
 
         # [words, phones] - select [1] for phonemes
         intervals = TextGrid.fromFile(path)
@@ -111,7 +129,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         phoneme_intervals_dict = {str(phoneme_intervals[i].maxTime): i for i in range(len(phoneme_intervals))}
 
         # Returns: Python Dictionary(key: phoneme_idx, value: punctuation_char)
-        punctuations = find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict)
+        punctuations = find_punctuation(wav_file, word_intervals_dict, phoneme_intervals_dict)
         word_boundaries_dict = {w.maxTime: 1 for w in word_intervals}
         phonemes = []
         durations = []
@@ -138,9 +156,7 @@ class TextMelLoader(torch.utils.data.Dataset):
                 if next_phoneme == "sp":
                     captured_space = True
                     next_duration = next_interval.maxTime - next_interval.minTime
-                else:
-                    next_duration = 0.0
-
+                else: next_duration = 0.0 
                 next_phoneme = punctuations[i]
 
             duration = interval.maxTime - interval.minTime
@@ -155,7 +171,7 @@ class TextMelLoader(torch.utils.data.Dataset):
 
             # Add word boundary token AFTER we've modified our other tokens
             if interval.maxTime in word_boundaries_dict:
-                word_boundary_token = "<bd>"
+                word_boundary_token = "sil"
                 phonemes.append(word_boundary_token)
                 if not captured_space and next_phoneme == "sp":
                     captured_space = True
@@ -163,16 +179,19 @@ class TextMelLoader(torch.utils.data.Dataset):
                 else:
                     durations.append(0.0)
 
-        text = self.get_text(phonemes)
+        text = self.get_arpabet(phonemes)
         duration = self.get_duration(durations)
 
         # Assume the stop/end token is missing
         if (len(text) - 1) == len(duration):
             duration = torch.cat((duration, torch.zeros(1, dtype=torch.float)), 0)
             
-        assert len(text) == len(duration), "duration length and phoneme token length are unequal. this breaks the entire model"
+        assert len(text) == len(duration), (str(len(text)) + " " + str(len(duration)) + " " + str(text) + " " + str(duration) + " " + str(phonemes) + " duration length and phoneme token length are unequal\n\nFILE: " + str(wav_file))
 
-        return (text, mel, duration, audio_name)
+        if text is None:
+            return None
+
+        return (text, mel, duration, audio_name, tokenized_text, mel2)
                 
 
     def get_mel_text_pair(self, audiopath_and_text):
@@ -184,7 +203,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         return (text, mel)
 
     def get_mel(self, filename):
-        npy_path = Path(filename).with_suffix('.npy')
+        npy_path = filename.with_suffix('.npy')
         if not npy_path.is_file():
             audio, sampling_rate = load_wav_to_torch(filename)
             if sampling_rate != self.stft.sampling_rate:
@@ -205,8 +224,19 @@ class TextMelLoader(torch.utils.data.Dataset):
 
         return melspec
 
-    def get_text(self, text):
+    def get_arpabet(self, text):
+        if text is None or text == '':
+            return None
+
         return torch.IntTensor(text_to_sequence(text, self.g2p, self.use_textgrid))
+
+    def get_tokenized_text(self, path):
+        if path is None or path == '':
+            return None
+
+        text = path.with_suffix('.lab').read_text()
+
+        return text
 
     def get_duration(self, duration):
         return torch.FloatTensor(duration)
@@ -228,6 +258,12 @@ class TextMelCollate():
     """ Zero-pads model inputs and targets based on number of frames per setep
     """
     def __init__(self, n_frames_per_step):
+        '''
+        self.samples = 5
+        self.frame_length = 96
+        self.overlap_length = 48
+        self.required_length = self.samples * (self.frame_length - self.overlap_length) + self.overlap_length
+        '''
         self.n_frames_per_step = n_frames_per_step
 
     def __call__(self, batch):
@@ -265,13 +301,30 @@ class TextMelCollate():
         mel_padded = torch.FloatTensor(len(batch), num_mels, max_target_len)
         mel_padded.zero_()
         output_lengths = torch.LongTensor(len(batch))
-        audio_names = torch.LongTensor(len(batch), 10)
+        audio_names = [''] * len(ids_sorted_decreasing)
+        text_strings = [''] * len(ids_sorted_decreasing)
         for i in range(len(ids_sorted_decreasing)):
             mel = batch[ids_sorted_decreasing[i]][1]
             mel_padded[i, :, :mel.size(1)] = mel
             output_lengths[i] = mel.size(1)
 
-            audio_names[i] = torch.LongTensor([ord(ch) for ch in batch[ids_sorted_decreasing[i]][3]])
+            audio_names[i] = batch[ids_sorted_decreasing[i]][3]
+            text_strings[i] = batch[ids_sorted_decreasing[i]][-2]
+
+        mels2 = []
+        for i in range(len(ids_sorted_decreasing)):
+            mel = batch[ids_sorted_decreasing[i]][-1]
+            '''
+            mel = Correction(patterns, self.required_length)
+            mel = np.stack([
+                mel[index:index + self.frame_length]
+                for index in range(0, self.required_length - self.overlap_length, self.frame_length - self.overlap_length)
+                ])
+            '''
+            mels2.append(mel)
+
+        mels2 = torch.FloatTensor(np.vstack(mels2)).transpose(2, 1)   # [Speakers * Samples, Mel_dim, Time]
+
 
         return text_padded, input_lengths, mel_padded, duration_padded, \
-            output_lengths, audio_names
+            output_lengths, audio_names, text_strings, mels2

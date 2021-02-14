@@ -3,6 +3,7 @@ import time
 import argparse
 import math
 import numpy as np
+import json
 from numpy import finfo
 
 import torch
@@ -13,6 +14,12 @@ from torch.utils.data import DataLoader
 import torch.cuda.amp as amp
 from torch import autograd
 import pytorch_warmup as warmup
+
+from speakerembedding.Inference import SpeakerInferencer
+
+from torchMoji.torchmoji.sentence_tokenizer import SentenceTokenizer
+from torchMoji.torchmoji.model_def import torchmoji_feature_encoding
+from torchMoji.torchmoji.global_variables import PRETRAINED_PATH, VOCAB_PATH
 
 from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
@@ -143,7 +150,7 @@ def teacher_forcing(model, dataset, batch_size, n_gpus, collate_fn, distributed_
             _, mel_out_postnet, _, _ = model(x)
 
             for j in range(len(x[2])):
-                audio_name = ''.join([chr(idx) for idx in audio_names[j].tolist()])
+                audio_name = audio_names[j]
                 output_length = output_lengths[j].item()
                 melspec = mel_out_postnet[j, :, :output_length]
 
@@ -153,8 +160,9 @@ def teacher_forcing(model, dataset, batch_size, n_gpus, collate_fn, distributed_
 
 
 def validate(model, criterion, valset, iteration, batch_size, n_gpus,
-             collate_fn, logger, distributed_run, rank):
+             collate_fn, logger, distributed_run, rank, val_speakerinferencer, torchmoji_model, st):
     """Handles all the validation scoring and printing"""
+
     model.eval()
     with torch.no_grad():
         val_sampler = DistributedSampler(valset) if distributed_run else None
@@ -164,7 +172,10 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
 
         val_loss = 0.0
         for i, batch in enumerate(val_loader):
-            x, y = model.parse_batch(batch)
+            speaker_embeddings = val_speakerinferencer.Inference(batch[-1])
+            tokenized, _, _ = st.tokenize_sentences(batch[-2])
+            torchmoji_encodings = torchmoji_model(tokenized)
+            x, y = model.parse_batch(batch, speaker_embeddings, torchmoji_encodings)
             y_pred = model(x)
             loss, losses_pkg = criterion(y_pred, y)
             if distributed_run:
@@ -213,8 +224,8 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
                                  weight_decay=hparams.weight_decay)
     scaler = amp.GradScaler()
-    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=12500, gamma=0.5)
-    warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=4000)
+    step_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=hparams.step_size, gamma=0.5)
+    warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=int(hparams.step_size*0.08))
 
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
@@ -225,6 +236,16 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
         output_directory, log_directory, rank)
 
     train_loader, valset, collate_fn = prepare_dataloaders(hparams)
+
+    # TODO: Add argument to set checkpoint path
+    train_speakerinferencer = SpeakerInferencer('speakerembedding/S_100000.pkl')    
+
+    # torchMoji
+    with open(VOCAB_PATH, 'r') as f:
+        vocabulary = json.load(f)
+    # 30 tokens maximum, as specified by torchMoji
+    st = SentenceTokenizer(vocabulary, 30)
+    torchmoji_model = torchmoji_feature_encoding(PRETRAINED_PATH)
 
     # Load checkpoint if one exists
     iteration = 1
@@ -250,6 +271,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
     model.train()
     is_overflow = False
 
+    step_scheduler.step_size = hparams.step_size
 
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
@@ -260,12 +282,25 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             optimizer.zero_grad()
 
             with amp.autocast():
-                x, y = model.parse_batch(batch)
                 if args.profiling:
                     with torch.autograd.profiler.profile(use_cuda=True) as prof:
-                        y_pred = model(x)
+                        # batch[-1] are the mels for speaker embeddings
+                        with torch.autograd.profiler.record_function("speaker_embeddings"):
+                            speaker_embeddings = train_speakerinferencer.Inference(batch[-1])
+                        with torch.autograd.profiler.record_function("torchmoji_embeddings"):
+                            tokenized, _, _ = st.tokenize_sentences(batch[-2])
+                            torchmoji_encodings = torchmoji_model(tokenized)
+                        with torch.autograd.profiler.record_function("parse_batch"):
+                            x, y = model.parse_batch(batch, speaker_embeddings, torchmoji_encodings)
+                        with torch.autograd.profiler.record_function("model"):
+                            y_pred = model(x)
                     print(prof.key_averages().table(sort_by="self_cuda_time_total"))
                 else:
+                    # batch[-1] are the mels for speaker embeddings
+                    speaker_embeddings = train_speakerinferencer.Inference(batch[-1])
+                    tokenized, _, _ = st.tokenize_sentences(batch[-2])
+                    torchmoji_encodings = torchmoji_model(tokenized)
+                    x, y = model.parse_batch(batch, speaker_embeddings, torchmoji_encodings)
                     y_pred = model(x)
                 loss, losses_pkg = criterion(y_pred, y)
 
@@ -297,7 +332,8 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(model, criterion, valset, iteration,
                          hparams.batch_size, n_gpus, collate_fn, logger,
-                         hparams.distributed_run, rank)
+                         hparams.distributed_run, rank, train_speakerinferencer, 
+                         torchmoji_model, st)
                 if rank == 0:
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
@@ -335,7 +371,7 @@ if __name__ == '__main__':
                         required=False, help='Distributed group name')
     parser.add_argument('--hparams', type=str,
                         required=False, help='comma separated name=value pairs')
-    parser.add_argument('--profiling', action='store_true',
+    parser.add_argument('-p', '--profiling', action='store_true',
                         required=False, help='enables the profiler')
 
     args = parser.parse_args()

@@ -12,8 +12,9 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Experiment Parameters        #
         ################################
-        epochs=1500,
+        epochs=150,
         iters_per_checkpoint=1000,
+        step_size=50000,
         seed=1234,
         dynamic_loss_scaling=True,
         fp16_run=False,
@@ -23,7 +24,7 @@ def create_hparams(hparams_string=None, verbose=False):
         cudnn_enabled=True,
         cudnn_benchmark=False,
         ignore_layers=['embedding.weight'],
-        num_workers=6,
+        num_workers=3,
 
         ################################
         # Data Parameters             #
@@ -37,10 +38,10 @@ def create_hparams(hparams_string=None, verbose=False):
         # Audio Parameters             #
         ################################
         max_wav_value=32768.0,
-        sampling_rate=22050,
-        filter_length=1024,
-        hop_length=256,
-        win_length=1024,
+        sampling_rate=24000,
+        filter_length=1200,
+        hop_length=300,
+        win_length=1200,
         n_mel_channels=80,
         mel_fmin=0.0,
         mel_fmax=8000.0,
@@ -52,11 +53,19 @@ def create_hparams(hparams_string=None, verbose=False):
         n_symbols=(len(symbols)+2),
         symbols_embedding_dim=512,
 
+        # Speaker embedding parameters
+        speaker_input_dim=256,
+        speaker_embedding_dim=256,
+
+        # Torchmoji embedding parameters
+        torchmoji_input_dim=2304,
+        torchmoji_embedding_dim=5,
+
         # Encoder parameters
         encoder_kernel_size=5,
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
-        encoder_output_dim=512,
+        encoder_output_dim=1024,
 
         # GST parameters
         gst_embedding_dim=128,
@@ -70,9 +79,8 @@ def create_hparams(hparams_string=None, verbose=False):
         tpse_rnn_size=256,
 
         # Duration parameters
-        duration_rnn_dim=512,
-        range_rnn_dim=512,
-        duration_lambda=2.0,
+        duration_rnn_dim=1024,
+        range_rnn_dim=1024,
         positional_embedding_dim=32,
         timestep_denominator=10000.0,
         lambda_duration=2.0,
@@ -81,7 +89,7 @@ def create_hparams(hparams_string=None, verbose=False):
         n_frames_per_step=1,  # currently only 1 is supported
         decoder_rnn_dim=1024,
         prenet_dim=256,
-        max_decoder_steps=1000,
+        max_decoder_steps=10000,
         gate_threshold=0.5,
         p_attention_dropout=0.1,
         p_decoder_dropout=0.1,
@@ -106,7 +114,7 @@ def create_hparams(hparams_string=None, verbose=False):
         learning_rate=1e-3,
         weight_decay=1e-6,
         grad_clip_thresh=10.0,
-        batch_size=128,
+        batch_size=32,
         mask_padding=True  # set model's padded outputs to padded values
     )
 

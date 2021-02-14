@@ -16,6 +16,38 @@ parentheses_pattern = re.compile(r"(?<=[.,!?] )[\(\[]|[\)\]](?=[.,!?])|^[\(\[]|[
 
 punctuations = "!\"“”‘’#$%&()*+,-./:;<=>?@[\]^_{|}~'" 
 
+abbreviations = [
+    (re.compile(fr"\b{abbreviation}\.", re.IGNORECASE), replacement.upper())
+    for abbreviation, replacement in [
+        ("mrs", "missis"),
+        ("mr", "mister"),
+        ("dr", "doctor"),
+        ("st", "saint"),
+        ("co", "company"),
+        ("jr", "junior"),
+        ("maj", "major"),
+        ("gen", "general"),
+        ("drs", "doctors"),
+        ("rev", "reverend"),
+        ("lt", "lieutenant"),
+        ("hon", "honorable"),
+        ("sgt", "sergeant"),
+        ("capt", "captain"),
+        ("esq", "esquire"),
+        ("ltd", "limited"),
+        ("col", "colonel"),
+        ("ft", "fort"),
+        ("etc", "etcetera"),
+    ]
+] 
+
+
+def expand_abbreviations(text):
+    for pattern, replacement in abbreviations:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def replace_symbols(text):
     # replace semi-colons and colons with commas
     text = text.replace(";", ",")
@@ -93,6 +125,7 @@ def format_input_text(text):
         text = new_text
         parentheses = pattern.search(text)
 
+    text = expand_abbreviations(text)
     text = replace_symbols(text)
 
     return text
@@ -150,8 +183,8 @@ def _clean_text(text, cleaner_names):
 
 def _symbols_to_sequence(symbols):
   for s in symbols:
-      if not _should_keep_symbol(s):
-          print(s)
+    if not _should_keep_symbol(s):
+      print(s)
 
   symbols = [_symbol_to_id[s] for s in symbols if _should_keep_symbol(s)]
 
@@ -159,7 +192,9 @@ def _symbols_to_sequence(symbols):
 
 
 def _arpabet_to_sequence(text):
-  return _symbols_to_sequence([s for s in text])
+  sym = [s for s in text]
+  sym_seq = _symbols_to_sequence(sym)
+  return sym_seq
 
 
 def _should_keep_symbol(s):
