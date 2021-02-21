@@ -12,11 +12,10 @@ class Tacotron2Logger(SummaryWriter):
     #def log_training(self, reduced_loss, grad_norm, learning_rate, duration,
     def log_training(self, reduced_loss, grad_norm, learning_rate, duration,
                      iteration, losses):
-            mel_loss, dur_loss = losses
-            #mel_loss, tpse_loss, dur_loss = losses
+            mel_loss, tpse_loss, dur_loss = losses
             self.add_scalar("training.loss", reduced_loss, iteration)
             self.add_scalar("training.mel_loss", mel_loss, iteration)
-            #self.add_scalar("training.tpse_loss", tpse_loss, iteration)
+            self.add_scalar("training.tpse_loss", tpse_loss, iteration)
             self.add_scalar("training.dur_loss", dur_loss, iteration)
             self.add_scalar("grad.norm", grad_norm, iteration)
             self.add_scalar("learning.rate", learning_rate, iteration)
@@ -24,8 +23,7 @@ class Tacotron2Logger(SummaryWriter):
 
     def log_validation(self, reduced_loss, model, y, y_pred, iteration):
         self.add_scalar("validation.loss", reduced_loss, iteration)
-        _, mel_outputs, _, alignments = y_pred
-        print(alignments.size(0))
+        _, mel_outputs, _, alignments, _, _ = y_pred
         mel_targets, gate_targets = y
 
         # plot distribution of parameters

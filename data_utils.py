@@ -56,6 +56,12 @@ def find_punctuation(audio_name, word_intervals_dict, phoneme_intervals_dict):
 #            if word == "co":
 #                print(new_text, word, text, word_intervals_dict)
 
+            try:
+                word_maxTime = word_intervals_dict[word]
+            except:
+                print(new_text, word, text, word_intervals_dict)
+                print(audio_name)
+                continue
             word_maxTime = word_intervals_dict[word]
             phoneme_idx = phoneme_intervals_dict[word_maxTime]
             found_phonemes[phoneme_idx] = char
@@ -100,7 +106,11 @@ class TextMelLoader(torch.utils.data.Dataset):
         # Get audiopaths, durations, and phonemes
         audio_name = Path(path).stem
         # TODO: HARDCODED PATH! SHOULD CHANGE THIS AT SOME POINT
-        mel = self.get_mel("LJSpeech/wavs/" + audio_name + ".wav")
+        wav_path = "LJSpeech/wavs/" + audio_name + ".wav"
+        mel = self.get_mel(wav_path)
+
+        # Text string for torchmoji embeddings
+        tokenizer_text = self.get_tokenizer_text(Path(wav_path))
 
         # [words, phones] - select [1] for phonemes
         intervals = TextGrid.fromFile(path)
@@ -163,7 +173,7 @@ class TextMelLoader(torch.utils.data.Dataset):
                 else:
                     durations.append(0.0)
 
-        text = self.get_text(phonemes)
+        text = self.get_arpabet(phonemes)
         duration = self.get_duration(durations)
 
         # Assume the stop/end token is missing
@@ -172,7 +182,7 @@ class TextMelLoader(torch.utils.data.Dataset):
             
         assert len(text) == len(duration), "duration length and phoneme token length are unequal. this breaks the entire model"
 
-        return (text, mel, duration, audio_name)
+        return (text, mel, duration, audio_name, tokenizer_text)
                 
 
     def get_mel_text_pair(self, audiopath_and_text):
@@ -205,8 +215,19 @@ class TextMelLoader(torch.utils.data.Dataset):
 
         return melspec
 
-    def get_text(self, text):
+    def get_arpabet(self, text):
+        if text is None or text == '':
+            return None
+
         return torch.IntTensor(text_to_sequence(text, self.g2p, self.use_textgrid))
+
+    def get_tokenizer_text(self, path):
+        if path is None or path == '':
+            return None
+
+        text = path.with_suffix('.lab').read_text()
+
+        return text
 
     def get_duration(self, duration):
         return torch.FloatTensor(duration)
@@ -266,12 +287,14 @@ class TextMelCollate():
         mel_padded.zero_()
         output_lengths = torch.LongTensor(len(batch))
         audio_names = torch.LongTensor(len(batch), 10)
+        text_strings = [''] * len(ids_sorted_decreasing)
         for i in range(len(ids_sorted_decreasing)):
             mel = batch[ids_sorted_decreasing[i]][1]
             mel_padded[i, :, :mel.size(1)] = mel
             output_lengths[i] = mel.size(1)
 
             audio_names[i] = torch.LongTensor([ord(ch) for ch in batch[ids_sorted_decreasing[i]][3]])
+            text_strings[i] = batch[ids_sorted_decreasing[i]][-1]
 
         return text_padded, input_lengths, mel_padded, duration_padded, \
-            output_lengths, audio_names
+            output_lengths, audio_names, text_strings

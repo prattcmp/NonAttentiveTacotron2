@@ -52,6 +52,10 @@ def create_hparams(hparams_string=None, verbose=False):
         n_symbols=(len(symbols)+2),
         symbols_embedding_dim=512,
 
+        # Torchmoji embedding parameters
+        torchmoji_input_dim=2304,
+        torchmoji_embedding_dim=5,
+
         # Encoder parameters
         encoder_kernel_size=5,
         encoder_n_convolutions=3,
@@ -59,7 +63,7 @@ def create_hparams(hparams_string=None, verbose=False):
         encoder_output_dim=512,
 
         # GST parameters
-        gst_embedding_dim=128,
+        gst_embedding_dim=64,
         gst_heads=4,
         gst_output_channels=[32, 32, 64, 64, 128, 128],
         gst_kernel_size=[3,3],
@@ -67,7 +71,7 @@ def create_hparams(hparams_string=None, verbose=False):
         gst_padding=[1,1],
 
         # TPSE parameters
-        tpse_rnn_size=256,
+        tpse_rnn_size=128,
 
         # Duration parameters
         duration_rnn_dim=512,

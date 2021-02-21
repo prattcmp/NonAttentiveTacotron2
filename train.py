@@ -2,6 +2,7 @@ import os
 import time
 import argparse
 import math
+import json
 import numpy as np
 from numpy import finfo
 
@@ -19,6 +20,10 @@ from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
 from hparams import create_hparams
+
+from torchMoji.torchmoji.sentence_tokenizer import SentenceTokenizer
+from torchMoji.torchmoji.model_def import torchmoji_emojis
+from torchMoji.torchmoji.global_variables import PRETRAINED_PATH, VOCAB_PATH
 
 from tqdm import tqdm
 
@@ -153,7 +158,7 @@ def teacher_forcing(model, dataset, batch_size, n_gpus, collate_fn, distributed_
 
 
 def validate(model, criterion, valset, iteration, batch_size, n_gpus,
-             collate_fn, logger, distributed_run, rank):
+             collate_fn, logger, distributed_run, rank, torchmoji_model, st):
     """Handles all the validation scoring and printing"""
     model.eval()
     with torch.no_grad():
@@ -164,21 +169,23 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
 
         val_loss = 0.0
         for i, batch in enumerate(val_loader):
-            x, y = model.parse_batch(batch)
+            tokenized, _, _ = st.tokenize_sentences(batch[-1])
+            torchmoji_encodings = torchmoji_model(tokenized)
+            x, y = model.parse_batch(batch, torchmoji_encodings)
             y_pred = model(x)
             loss, losses_pkg = criterion(y_pred, y)
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
                 reduced_val_mel = reduce_tensor(losses_pkg[0].data, n_gpus).item()
                 reduced_val_dur = reduce_tensor(losses_pkg[1].data, n_gpus).item()
-                #reduced_val_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
-                #reduced_val_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
+                reduced_val_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                reduced_val_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
                 reduced_val_mel = losses_pkg[0].item()
                 reduced_val_dur = losses_pkg[1].item()
-                #reduced_val_tpse = losses_pkg[1].item()
-                #reduced_val_dur = losses_pkg[2].item()
+                reduced_val_tpse = losses_pkg[1].item()
+                reduced_val_dur = losses_pkg[2].item()
 
             val_loss += reduced_val_loss
         val_loss = val_loss / (i + 1)
@@ -226,6 +233,12 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
 
     train_loader, valset, collate_fn = prepare_dataloaders(hparams)
 
+    # torchMoji
+    with open(VOCAB_PATH, 'r') as f:
+        vocabulary = json.load(f)
+    st = SentenceTokenizer(vocabulary, 1000)
+    torchmoji_model = torchmoji_emojis(PRETRAINED_PATH)
+
     # Load checkpoint if one exists
     iteration = 1
     epoch_offset = 1
@@ -259,31 +272,35 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
 
             optimizer.zero_grad()
 
+            # 30 tokens maximum, as specified by torchMoji
+            tokenized, _, _ = st.tokenize_sentences(batch[-1])
+            torchmoji_encodings = torchmoji_model(tokenized)
+
             with amp.autocast():
-                x, y = model.parse_batch(batch)
+                x, y = model.parse_batch(batch, torchmoji_encodings)
                 if args.profiling:
                     with torch.autograd.profiler.profile(use_cuda=True) as prof:
                         y_pred = model(x)
                     print(prof.key_averages().table(sort_by="self_cuda_time_total"))
                 else:
                     y_pred = model(x)
+
                 loss, losses_pkg = criterion(y_pred, y)
 
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
                 reduced_mel = reduce_tensor(losses_pkg[0].data, n_gpus).item()
                 reduced_dur = reduce_tensor(losses_pkg[1].data, n_gpus).item()
-                #reduced_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
-                #reduced_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
+                reduced_tpse = reduce_tensor(losses_pkg[1].data, n_gpus).item()
+                reduced_dur = reduce_tensor(losses_pkg[2].data, n_gpus).item()
             else:
                 reduced_loss = loss.item()
                 reduced_mel = losses_pkg[0].item()
                 reduced_dur = losses_pkg[1].item()
-                #reduced_tpse = losses_pkg[1].item()
-                #reduced_dur = losses_pkg[2].item()
+                reduced_tpse = losses_pkg[1].item()
+                reduced_dur = losses_pkg[2].item()
 
-            losses_pkg = reduced_mel, reduced_dur
-            #losses_pkg = reduced_mel, reduced_tpse, reduced_dur
+            losses_pkg = reduced_mel, reduced_tpse, reduced_dur
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -297,7 +314,7 @@ def train(args, output_directory, log_directory, checkpoint_path, warm_start, n_
             if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(model, criterion, valset, iteration,
                          hparams.batch_size, n_gpus, collate_fn, logger,
-                         hparams.distributed_run, rank)
+                         hparams.distributed_run, rank, torchmoji_model, st)
                 if rank == 0:
                     checkpoint_path = os.path.join(
                         output_directory, "checkpoint_{}".format(iteration))
